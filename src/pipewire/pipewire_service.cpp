@@ -313,6 +313,8 @@ namespace {
     };
 
     updateStringField(nd.linkGroup, PW_KEY_NODE_LINK_GROUP);
+    updateStringField(nd.mediaRole, "media.role");
+    updateStringField(nd.nodeGroup, "node.group");
 
     const bool hasTargetObject = dictHas(props, PW_KEY_TARGET_OBJECT);
     const bool hasNodeTarget = dictHas(props, "node.target");
@@ -1969,6 +1971,8 @@ void PipeWireService::rebuildState() {
     node.streamTitle = nd->streamTitle;
     node.iconName = nd->iconName;
     node.mediaClass = nd->mediaClass;
+    node.mediaRole = nd->mediaRole;
+    node.nodeGroup = nd->nodeGroup;
     node.volume = nd->volume;
     node.muted = nd->muted;
     node.channelCount = nd->channelCount;

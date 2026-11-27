@@ -609,6 +609,72 @@ namespace {
     return artists.empty() ? player->title : artists + " - " + player->title;
   }
 
+  bool sameAudioLabel(std::string_view a, std::string_view b) {
+    if (a.empty() || b.empty()) {
+      return false;
+    }
+    return StringUtils::toLower(std::string(a)) == StringUtils::toLower(std::string(b));
+  }
+
+  // Sink a program stream plays to: its pinned route target, else the current default sink.
+  std::string programStreamTargetLabel(const AudioNode& node, const AudioState& state) {
+    const std::uint32_t sinkId = node.routePinned ? node.routeSinkId : state.defaultSinkId;
+    if (sinkId != 0) {
+      if (const auto it = std::ranges::find(state.sinks, sinkId, &AudioNode::id); it != state.sinks.end()) {
+        return audioDeviceLabel(*it);
+      }
+    }
+    return node.routePinned ? std::string{"missing target"} : std::string{};
+  }
+
+  // "Where it comes from -> where it goes": the PipeWire stream identity (intent role, node
+  // name/description, process binary) followed by the sink it plays to. When `includeTitle` is set
+  // the stream's media title is prepended too — used for the hover tooltip so nothing is hidden,
+  // while the visible descriptor stays compact and always shows the destination.
+  std::string programStreamDescriptor(
+      const AudioNode& node, std::string_view appName, std::string_view targetLabel, bool includeTitle
+  ) {
+    std::vector<std::string> parts;
+    auto push = [&parts](const std::string& value) {
+      if (value.empty() || std::ranges::contains(parts, value)) {
+        return;
+      }
+      parts.push_back(value);
+    };
+    auto pushDistinct = [&](const std::string& value, std::string_view skipA, std::string_view skipB) {
+      if (value.empty() || sameAudioLabel(value, skipA) || sameAudioLabel(value, skipB)) {
+        return;
+      }
+      push(value);
+    };
+
+    if (includeTitle) {
+      pushDistinct(node.streamTitle, appName, std::string_view{});
+    }
+    if (!node.mediaRole.empty()) {
+      push(node.mediaRole);
+    }
+    pushDistinct(node.description, appName, std::string_view{});
+    pushDistinct(node.name, node.description, std::string_view{});
+    pushDistinct(node.applicationBinary, node.name, node.description);
+
+    std::string out;
+    for (const auto& part : parts) {
+      if (!out.empty()) {
+        out += "  \u00b7  ";
+      }
+      out += part;
+    }
+    if (!targetLabel.empty()) {
+      if (!out.empty()) {
+        out += "  ";
+      }
+      out += "\u2192  ";
+      out += targetLabel;
+    }
+    return out;
+  }
+
   std::string
   programResolutionIdentityKey(const AudioNode& node, const MprisPlayerInfo* player, std::string_view resolvedAppName) {
     std::string key;
@@ -989,8 +1055,8 @@ namespace {
       setDirection(FlexDirection::Horizontal);
       setAlign(FlexAlign::Center);
       setGap(Style::spaceMd * scale);
-      setPadding(Style::spaceSm * scale, Style::spaceMd * scale);
-      setMinHeight((Style::controlHeightLg + Style::spaceSm) * scale);
+      setPadding(Style::spaceXs * scale, Style::spaceMd * scale);
+      setMinHeight(Style::controlHeightLg * scale);
       setStyleRadius(Style::radiusMd, scale);
       setFill(colorSpecFromRole(ColorRole::Surface));
       clearBorder();
@@ -1058,6 +1124,7 @@ namespace {
                               .fontSize = Style::fontSizeCaption * scale,
                               .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
                               .maxLines = 1,
+                              .ellipsize = TextEllipsize::End,
                               .visible = false,
                           })
                       ),
@@ -1181,30 +1248,24 @@ namespace {
         }
       }
 
-      // Bound labels to protect row layout when app names or stream titles are long.
+      // Bound the labels so a long app name can't squeeze the descriptor out.
       if (m_appNameLabel != nullptr) {
         const float rowWidth = width();
+        // Text column width: the row minus icon, both action buttons and the value label.
+        const float actionsWidth = 2.0F * Style::controlHeightSm * m_scale + Style::spaceXs * m_scale;
         const float textMax = std::max(
             80.0F * m_scale,
-            rowWidth
-                - paddingLeft()
-                - paddingRight()
-                - m_iconSize
-                - m_iconContentGap
-                - m_valueLabelMinWidth
-                - Style::spaceSm * m_scale
-                - Style::controlHeightSm * m_scale
-                - gap()
+            rowWidth - paddingLeft() - paddingRight() - m_iconSize - m_iconContentGap - actionsWidth - gap()
+                - m_valueLabelMinWidth - Style::spaceSm * m_scale
         );
         const bool showSubtitle = m_subtitleLabel != nullptr && m_subtitleLabel->visible();
-        const float titleGap = showSubtitle ? Style::spaceXs * m_scale : 0.0F;
-        const float titleBudget = std::max(0.0F, textMax - titleGap);
-        float appMax = showSubtitle ? std::max(44.0F * m_scale, titleBudget * 0.68F) : textMax;
-        float subtitleMax = showSubtitle ? std::max(0.0F, titleBudget - appMax) : textMax;
+        // The descriptor carries the useful info, so give it the lion's share of the line.
+        float appMax = showSubtitle ? std::max(44.0F * m_scale, textMax * 0.34F) : textMax;
+        float subtitleMax = showSubtitle ? std::max(0.0F, textMax - appMax - Style::spaceXs * m_scale) : textMax;
         const float subtitleMin = 36.0F * m_scale;
         if (showSubtitle && subtitleMax < subtitleMin) {
-          subtitleMax = std::min(subtitleMin, titleBudget * 0.45F);
-          appMax = std::max(0.0F, titleBudget - subtitleMax);
+          subtitleMax = std::min(subtitleMin, textMax * 0.5F);
+          appMax = std::max(0.0F, textMax - subtitleMax);
         }
         m_appNameLabel->setMaxWidth(appMax);
         if (m_subtitleLabel != nullptr) {
@@ -1226,39 +1287,40 @@ namespace {
     }
 
     void syncFromNode(
-        const AudioNode& node, const MprisPlayerInfo* player, bool isDefault, float sliderMax, bool nodeEnabled,
-        std::size_t mprisPlayerCount
+        const AudioNode& node, const MprisPlayerInfo* player, std::string_view descriptor, std::string_view tooltipText,
+        float sliderMax, bool nodeEnabled, std::size_t mprisPlayerCount
     ) {
       const ResolveProgramNameResult resolved = resolveProgramDisplayName(node, player);
       const std::string& resolvedAppName = resolved.displayName;
       logDesktopEntryMatchIfChanged(m_desktopMatchLogKey, node.id, resolved.desktop);
       logProgramVolumeResolutionIfChanged(m_programResolutionLogKey, node, player, resolvedAppName, mprisPlayerCount);
 
-      std::string title = node.streamTitle;
-      if (title.empty() && !node.name.empty() && node.name != resolvedAppName) {
-        title = node.name;
-      }
-      if (title == resolvedAppName || isGenericAudioLabel(title) || isLikelyFallbackStreamLabel(title)) {
-        title.clear();
-      }
-      if (title.empty()) {
-        title = nowPlayingLabel(player);
+      if (m_appNameLabel->text() != resolvedAppName) {
+        m_appNameLabel->setText(resolvedAppName);
       }
 
-      const std::string appNameText = (isDefault ? "• " : "") + resolvedAppName;
-      if (m_appNameLabel->text() != appNameText) {
-        m_appNameLabel->setText(appNameText);
+      // Descriptor line: where the stream comes from and where it goes. Falls back to now-playing.
+      std::string subtitle(descriptor);
+      if (subtitle.empty()) {
+        subtitle = nowPlayingLabel(player);
       }
-      const bool showSubtitle = !title.empty() && title != resolvedAppName;
-      if (m_subtitleLabel->visible() != showSubtitle) {
-        m_subtitleLabel->setVisible(showSubtitle);
-      }
-      if (showSubtitle) {
-        if (m_subtitleLabel->text() != title) {
-          m_subtitleLabel->setText(title);
+      const bool showSubtitle = m_subtitleLabel != nullptr && !subtitle.empty();
+      if (m_subtitleLabel != nullptr) {
+        if (m_subtitleLabel->visible() != showSubtitle) {
+          m_subtitleLabel->setVisible(showSubtitle);
         }
-      } else if (!m_subtitleLabel->text().empty()) {
-        m_subtitleLabel->setText("");
+        if (showSubtitle) {
+          if (m_subtitleLabel->text() != subtitle) {
+            m_subtitleLabel->setText(subtitle);
+          }
+          // Full descriptor (including the media title) on hover, even if the two-line wrap clips.
+          m_subtitleLabel->setTooltip(tooltipText.empty() ? subtitle : std::string(tooltipText));
+        } else {
+          if (!m_subtitleLabel->text().empty()) {
+            m_subtitleLabel->setText("");
+          }
+          m_subtitleLabel->clearTooltip();
+        }
       }
 
       const float displayedVolume = std::max(0.0F, node.volume);
@@ -2274,7 +2336,12 @@ void AudioTab::rebuildProgramVolumes(Renderer& renderer) {
           [this, sinkId = sink.id](float value) { queueProgramSinkVolume(sinkId, value); },
           [this] { flushPendingProgramVolumes(true); }
       );
-      row->syncFromNode(sink, player, false, sliderMax, true, players.size());
+      const std::string appName = resolveProgramDisplayName(sink, player).displayName;
+      const std::string target = programStreamTargetLabel(sink, state);
+      row->syncFromNode(
+          sink, player, programStreamDescriptor(sink, appName, target, false),
+          programStreamDescriptor(sink, appName, target, true), sliderMax, true, players.size()
+      );
       row->setRoutingMenuRequestedCallback([this, streamId = sink.id](Node* anchor) {
         const bool wasOpen = m_deviceMenuPopup != nullptr && m_deviceMenuPopup->isOpen();
         const bool wasOpenForThis = wasOpen && m_openProgramRoutingMenuStreamId == streamId;
@@ -2325,7 +2392,12 @@ void AudioTab::syncProgramVolumeRows() {
       continue;
     }
     const MprisPlayerInfo* player = findMatchingPlayer(players, *it->second, it->second->applicationName);
-    row->syncFromNode(*it->second, player, false, sliderMax, true, players.size());
+    const std::string appName = resolveProgramDisplayName(*it->second, player).displayName;
+    const std::string target = programStreamTargetLabel(*it->second, state);
+    row->syncFromNode(
+        *it->second, player, programStreamDescriptor(*it->second, appName, target, false),
+        programStreamDescriptor(*it->second, appName, target, true), sliderMax, true, players.size()
+    );
   }
 }
 

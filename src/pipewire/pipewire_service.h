@@ -35,6 +35,12 @@ struct AudioNode {
   std::string streamTitle;
   std::string iconName;
   std::string mediaClass; // "Audio/Sink", "Audio/Source"
+  // Extra PipeWire identity surfaced in the Audio tab: the intent role of a stream
+  // (application audio vs. communication, e.g. "Music"/"Communication") and the node.group a
+  // client puts its related streams in. Both are shown as extra per-stream info and node.group is
+  // used to group streams that belong to one application into a single volume card.
+  std::string mediaRole;
+  std::string nodeGroup;
   // Explicit output route of a program stream (metadata "target.object"): routePinned is set while
   // the stream does not follow the default sink; routeSinkId is the resolved sink node id, or 0 when
   // the pinned target no longer exists.
@@ -167,6 +173,8 @@ public:
     std::string mediaName;
     std::string iconName;
     std::string mediaClass;
+    std::string mediaRole;
+    std::string nodeGroup;
     std::string linkGroup;
     std::string targetObject;
     bool nodePassive = false;
