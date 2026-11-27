@@ -316,14 +316,19 @@ namespace noctalia::theme {
 
   TemplateApplyService::ApplyRequest
   TemplateApplyService::makeRequest(const GeneratedPalette& palette, std::string_view defaultMode) const {
-    const Config& config = m_config.config();
-    const ThemeConfig& theme = config.theme;
+    // Templates, the mode they render, and the scheme they derive from follow the
+    // effective theme of the wallpaper driving the palette. The resolver starts from
+    // global, so the non-overridden path is unchanged.
+    const std::string wallpaperPath = m_config.getPaletteWallpaperPath();
+    const ThemeConfig theme = m_config.effectiveThemeForWallpaper(wallpaperPath).theme;
+    Config config = m_config.config();
+    config.theme = theme;
     return ApplyRequest{
         .palette = palette,
         .templates = theme.templates,
         .configTable = std::make_shared<const toml::table>(config_export::serialize(config)),
         .defaultMode = std::string(defaultMode),
-        .imagePath = m_config.getPaletteWallpaperPath(),
+        .imagePath = wallpaperPath,
         .schemeType = schemeTypeFromConfig(theme),
     };
   }

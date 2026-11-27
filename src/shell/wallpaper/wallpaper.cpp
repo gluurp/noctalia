@@ -6,6 +6,8 @@
 #include "core/random.h"
 #include "cursor-shape-v1-client-protocol.h"
 #include "ipc/ipc_service.h"
+#include "i18n/i18n.h"
+#include "notification/notifications.h"
 #include "render/animation/animation.h"
 #include "render/backend/render_backend.h"
 #include "render/core/render_styles.h"
@@ -30,6 +32,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string_view>
@@ -649,7 +652,105 @@ bool Wallpaper::isConnectorKnown(std::string_view connector) const {
   });
 }
 
+void Wallpaper::noteAutomationLinkSkip(std::string_view connector) {
+  if (m_automationWarning.empty()) {
+    m_automationWarning = "automation is not link-aware yet; skipped linked monitors: ";
+  } else {
+    m_automationWarning += ", ";
+  }
+  m_automationWarning.append(connector);
+  kLog.warn(
+      "automation skipped linked monitor {} (linked sets are not rotated automatically yet)", connector
+  );
+}
+
+bool Wallpaper::applyLinkedResolvedWallpaper(const std::string& resolvedPath) {
+  if (m_config == nullptr) {
+    return false;
+  }
+
+  const auto mapping = wallpaper::mapLinkedWallpaper(m_config->config().wallpaper, resolvedPath);
+  if (!mapping.has_value() || mapping->appliedConnectors.empty()) {
+    return false;
+  }
+
+  std::map<std::string, std::string> paths;
+  for (const auto& target : mapping->targets) {
+    if (target.present) {
+      paths.emplace(target.monitor, target.path);
+    }
+  }
+  if (paths.empty()) {
+    return false;
+  }
+
+  const std::optional<std::string> palettePath =
+      mapping->colorSourcePath.empty() ? std::nullopt : std::optional<std::string>{mapping->colorSourcePath};
+
+  // One table mutation, one write, one wallpaper-change callback for the set.
+  // `palette.path` follows the selected color-source member.
+  m_config->setWallpaperPaths(paths, palettePath);
+
+  if (!mapping->missingConnectors.empty()) {
+    std::string missing;
+    for (const auto& connector : mapping->missingConnectors) {
+      if (!missing.empty()) {
+        missing += ", ";
+      }
+      missing += connector;
+    }
+    kLog.warn("linked wallpaper missing targets: {}", missing);
+    notify::info(
+        "Noctalia", i18n::tr("wallpaper.panel.link-missing-title"),
+        i18n::tr("wallpaper.panel.link-missing-target", "monitors", missing)
+    );
+  }
+
+  for (const auto& target : mapping->targets) {
+    if (!target.present) {
+      continue;
+    }
+    const WaylandOutput* output = nullptr;
+    if (m_wayland != nullptr) {
+      for (const auto& out : m_wayland->outputs()) {
+        if (out.connectorName == target.monitor) {
+          output = &out;
+          break;
+        }
+      }
+    }
+    notifyKdePlasmaWallpaper(target.path, target.monitor, output);
+  }
+
+  m_lastApplyResult = WallpaperApplyResult{
+      .linked = true,
+      .appliedConnectors = mapping->appliedConnectors,
+      .missingConnectors = mapping->missingConnectors,
+      .colorSourceMonitor = mapping->colorSourceMonitor,
+  };
+
+  if (!mapping->missingConnectors.empty()) {
+    kLog.warn(
+        "linked wallpaper \"{}\": no matching file for {}", mapping->groupName,
+        StringUtils::join(mapping->missingConnectors, ", ")
+    );
+  }
+  kLog.info(
+      "linked wallpaper \"{}\" applied to {} monitor(s), palette from {}", mapping->groupName,
+      mapping->appliedConnectors.size(), mapping->colorSourceMonitor
+  );
+
+  return true;
+}
+
 void Wallpaper::applyResolvedWallpaper(const std::optional<std::string>& connector, const std::string& resolvedPath) {
+  // A path inside a link member directory applies the whole set; anything else
+  // keeps the existing single-monitor/default behavior.
+  if (!resolvedPath.starts_with("color:") && applyLinkedResolvedWallpaper(resolvedPath)) {
+    return;
+  }
+  m_lastApplyResult = {};
+
   const WaylandOutput* output = nullptr;
   if (connector.has_value() && m_wayland != nullptr) {
     for (const auto& out : m_wayland->outputs()) {
@@ -660,24 +761,6 @@ void Wallpaper::applyResolvedWallpaper(const std::optional<std::string>& connect
     }
   }
   notifyKdePlasmaWallpaper(resolvedPath, connector.value_or(""), output);
-
-  if (const WallpaperFavorite* favorite = m_config->wallpaperFavorite(resolvedPath); favorite != nullptr) {
-    if (connector.has_value()) {
-      m_config->applyWallpaperSelection(connector, resolvedPath, favorite, {});
-      return;
-    }
-
-    std::vector<std::string> connectors;
-    if (m_wayland != nullptr) {
-      for (const auto& out : m_wayland->outputs()) {
-        if (!out.connectorName.empty()) {
-          connectors.push_back(out.connectorName);
-        }
-      }
-    }
-    m_config->applyWallpaperSelection(std::nullopt, resolvedPath, favorite, connectors);
-    return;
-  }
 
   if (connector.has_value()) {
     m_config->setWallpaperPath(connector, resolvedPath);
@@ -958,6 +1041,7 @@ void Wallpaper::applyStartupAutomation(std::int64_t secondStamp) {
   const auto& outputs = m_wayland->outputs();
   const ThemeMode mode = directoryThemeMode();
   bool attempted = false;
+  m_automationWarning.clear();
 
   std::optional<ConfigService::WallpaperBatch> batch(std::in_place, *m_config);
 
@@ -971,6 +1055,11 @@ void Wallpaper::applyStartupAutomation(std::int64_t secondStamp) {
       }
 
       attempted = true;
+      if (m_config->linkGroupForMonitor(output.connectorName) != nullptr) {
+        noteAutomationLinkSkip(output.connectorName);
+        continue;
+      }
+
       const std::string dir = wallpaper::resolveWallpaperDirectory(wallpaper, output, mode);
       std::vector<std::string> candidates;
       collectWallpaperCandidates(dir, automation.recursive, candidates);
@@ -986,26 +1075,30 @@ void Wallpaper::applyStartupAutomation(std::int64_t secondStamp) {
         continue;
       }
 
-      if (const WallpaperFavorite* favorite = m_config->wallpaperFavorite(picked); favorite != nullptr) {
-        m_config->applyWallpaperSelection(output.connectorName, picked, favorite, {});
-      } else {
-        m_config->setWallpaperPath(output.connectorName, picked);
-      }
+      m_config->setWallpaperPath(output.connectorName, picked);
       m_pendingStartupChanges.push_back({.path = picked, .connector = output.connectorName});
       kLog.info("startup automation set {} → {}", output.connectorName, picked);
     }
   } else {
+    std::vector<std::string> connectors;
+    bool skippedLinked = false;
     for (const auto& output : outputs) {
-      if (output.done
-          && !output.connectorName.empty()
-          && output.hasUsableGeometry()
-          && wallpaperOutputEnabled(wallpaper, output)) {
-        attempted = true;
-        break;
+      if (!output.done
+          || output.connectorName.empty()
+          || !output.hasUsableGeometry()
+          || !wallpaperOutputEnabled(wallpaper, output)) {
+        continue;
       }
+      attempted = true;
+      if (m_config->linkGroupForMonitor(output.connectorName) != nullptr) {
+        noteAutomationLinkSkip(output.connectorName);
+        skippedLinked = true;
+        continue;
+      }
+      connectors.push_back(output.connectorName);
     }
 
-    if (attempted) {
+    if (!connectors.empty()) {
       const std::string dir = wallpaper::resolveGlobalWallpaperDirectory(wallpaper, mode);
       std::vector<std::string> candidates;
       collectWallpaperCandidates(dir, automation.recursive, candidates);
@@ -1014,27 +1107,16 @@ void Wallpaper::applyStartupAutomation(std::int64_t secondStamp) {
         const std::string picked =
             pickAutomationWallpaperPath(automation, std::move(candidates), currentDefault, kGlobalShuffleScope, dir);
         if (!picked.empty()) {
-          std::vector<std::string> connectors;
-          for (const auto& output : outputs) {
-            if (output.done
-                && !output.connectorName.empty()
-                && output.hasUsableGeometry()
-                && wallpaperOutputEnabled(wallpaper, output)) {
-              connectors.push_back(output.connectorName);
-            }
-          }
           for (const auto& connector : connectors) {
+            m_config->setWallpaperPath(connector, picked);
             m_pendingStartupChanges.push_back({.path = picked, .connector = connector});
           }
-          if (const WallpaperFavorite* favorite = m_config->wallpaperFavorite(picked); favorite != nullptr) {
-            m_config->applyWallpaperSelection(std::nullopt, picked, favorite, connectors);
-          } else {
-            for (const auto& connector : connectors) {
-              m_config->setWallpaperPath(connector, picked);
-            }
+          // The default is global: writing it would drag a linked monitor without
+          // its own stored path along with the rotation.
+          if (!skippedLinked) {
             m_config->setWallpaperPath(std::nullopt, picked);
           }
-          kLog.info("startup automation set all outputs → {}", picked);
+          kLog.info("startup automation set non-linked outputs → {}", picked);
         }
       }
     }
@@ -1063,12 +1145,17 @@ void Wallpaper::runAutomation(std::int64_t secondStamp) {
   }
 
   const ThemeMode mode = directoryThemeMode();
+  m_automationWarning.clear();
 
   ConfigService::WallpaperBatch batch(*m_config);
 
   if (wallpaper.perMonitorDirectories) {
     for (const auto& inst : m_instances) {
       if (inst->connectorName.empty()) {
+        continue;
+      }
+      if (m_config->linkGroupForMonitor(inst->connectorName) != nullptr) {
+        noteAutomationLinkSkip(inst->connectorName);
         continue;
       }
       const WaylandOutput* output = nullptr;
@@ -1094,40 +1181,44 @@ void Wallpaper::runAutomation(std::int64_t secondStamp) {
       if (picked.empty() || picked == currentPath) {
         continue;
       }
-      if (const WallpaperFavorite* favorite = m_config->wallpaperFavorite(picked); favorite != nullptr) {
-        m_config->applyWallpaperSelection(inst->connectorName, picked, favorite, {});
-      } else {
-        m_config->setWallpaperPath(inst->connectorName, picked);
-      }
+      m_config->setWallpaperPath(inst->connectorName, picked);
       kLog.info("automation set {} → {}", inst->connectorName, picked);
     }
   } else {
-    std::vector<std::string> candidates;
-    const std::string dir = wallpaper::resolveGlobalWallpaperDirectory(wallpaper, mode);
-    collectWallpaperCandidates(dir, automation.recursive, candidates);
-    if (!candidates.empty()) {
-      const std::string currentDefault = m_config->getDefaultWallpaperPath();
-      const std::string picked =
-          pickAutomationWallpaperPath(automation, std::move(candidates), currentDefault, kGlobalShuffleScope, dir);
-      if (!picked.empty()) {
-        if (const WallpaperFavorite* favorite = m_config->wallpaperFavorite(picked); favorite != nullptr) {
-          std::vector<std::string> connectors;
-          connectors.reserve(m_instances.size());
-          for (const auto& inst : m_instances) {
-            if (!inst->connectorName.empty()) {
-              connectors.push_back(inst->connectorName);
-            }
+    std::vector<std::string> connectors;
+    bool skippedLinked = false;
+    connectors.reserve(m_instances.size());
+    for (const auto& inst : m_instances) {
+      if (inst->connectorName.empty()) {
+        continue;
+      }
+      if (m_config->linkGroupForMonitor(inst->connectorName) != nullptr) {
+        noteAutomationLinkSkip(inst->connectorName);
+        skippedLinked = true;
+        continue;
+      }
+      connectors.push_back(inst->connectorName);
+    }
+
+    if (!connectors.empty()) {
+      std::vector<std::string> candidates;
+      const std::string dir = wallpaper::resolveGlobalWallpaperDirectory(wallpaper, mode);
+      collectWallpaperCandidates(dir, automation.recursive, candidates);
+      if (!candidates.empty()) {
+        const std::string currentDefault = m_config->getDefaultWallpaperPath();
+        const std::string picked =
+            pickAutomationWallpaperPath(automation, std::move(candidates), currentDefault, kGlobalShuffleScope, dir);
+        if (!picked.empty()) {
+          for (const auto& connector : connectors) {
+            m_config->setWallpaperPath(connector, picked);
           }
-          m_config->applyWallpaperSelection(std::nullopt, picked, favorite, connectors);
-        } else {
-          for (const auto& inst : m_instances) {
-            if (!inst->connectorName.empty()) {
-              m_config->setWallpaperPath(inst->connectorName, picked);
-            }
+          // The default is global: writing it would drag a linked monitor without
+          // its own stored path along with the rotation.
+          if (!skippedLinked) {
+            m_config->setWallpaperPath(std::nullopt, picked);
           }
-          m_config->setWallpaperPath(std::nullopt, picked);
+          kLog.info("automation set non-linked outputs → {}", picked);
         }
-        kLog.info("automation set all outputs → {}", picked);
       }
     }
   }

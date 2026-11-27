@@ -658,6 +658,7 @@ void ConfigService::setNotificationManager(NotificationManager* manager) {
 void ConfigService::forceReload() {
   const auto oldDefault = m_defaultWallpaperPath;
   const auto oldLast = m_lastWallpaperPath;
+  const auto oldPalette = m_paletteWallpaperPath;
   const auto oldMonitors = m_monitorWallpaperPaths;
 
   loadAll();
@@ -665,6 +666,7 @@ void ConfigService::forceReload() {
   const bool wallpaperChanged =
       (oldDefault != m_defaultWallpaperPath
        || oldLast != m_lastWallpaperPath
+       || oldPalette != m_paletteWallpaperPath
        || oldMonitors != m_monitorWallpaperPaths);
   if (wallpaperChanged && m_wallpaperChangeCallback) {
     m_wallpaperChangeCallback();
@@ -1028,6 +1030,7 @@ void ConfigService::applyPendingWatchReload() {
 
   const auto oldDefault = m_defaultWallpaperPath;
   const auto oldLast = m_lastWallpaperPath;
+  const auto oldPalette = m_paletteWallpaperPath;
   const auto oldMonitors = m_monitorWallpaperPaths;
 
   if (overridesChanged) {
@@ -1044,6 +1047,7 @@ void ConfigService::applyPendingWatchReload() {
   const bool wallpaperChanged =
       (oldDefault != m_defaultWallpaperPath
        || oldLast != m_lastWallpaperPath
+       || oldPalette != m_paletteWallpaperPath
        || oldMonitors != m_monitorWallpaperPaths);
   if (wallpaperChanged && m_wallpaperChangeCallback) {
     m_wallpaperChangeCallback();
@@ -1404,6 +1408,7 @@ void ConfigService::loadOverridesFromFile() {
   m_overridesTable = toml::table{};
   m_defaultWallpaperPath.clear();
   m_lastWallpaperPath.clear();
+  m_paletteWallpaperPath.clear();
   m_monitorWallpaperPaths.clear();
   m_overridesParseError = {};
 
@@ -1716,6 +1721,7 @@ void ConfigService::loadAll() {
     m_configFileCalendarAccountNames.clear();
     m_defaultWallpaperPath.clear();
     m_lastWallpaperPath.clear();
+    m_paletteWallpaperPath.clear();
     m_monitorWallpaperPaths.clear();
     updateLegacyConfigIssues({});
     setConfigParseError(m_overridesParseError);
@@ -1796,6 +1802,7 @@ void ConfigService::loadAll() {
     m_configFileCalendarAccountNames.clear();
     m_defaultWallpaperPath.clear();
     m_lastWallpaperPath.clear();
+    m_paletteWallpaperPath.clear();
     m_monitorWallpaperPaths.clear();
   } else {
     // Parse error with a usable previous config retained — fan out conservatively.

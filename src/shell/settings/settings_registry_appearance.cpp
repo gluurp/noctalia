@@ -17,6 +17,7 @@
 
 #include <array>
 #include <cstddef>
+#include <filesystem>
 #include <cstdlib>
 #include <optional>
 #include <string>
@@ -285,6 +286,37 @@ namespace settings::registry {
   void addWallpaperSettings(std::vector<SettingEntry>& entries, const Config& cfg, const RegistryEnvironment& env) {
     using i18n::tr;
     entries.push_back(makeEntry(
+        SettingsSection::Wallpaper, "wallpaper-colors", tr("settings.schema.wallpaper.wallpaper-colors.label"),
+        tr("settings.schema.wallpaper.wallpaper-colors.description"), {},
+        ButtonSetting{
+            .label = tr("settings.schema.wallpaper.wallpaper-colors.edit"),
+            .glyph = "color-picker",
+        },
+        "wallpaper colors palette per wallpaper saved active"
+    ));
+    entries.back().actionId = "wallpaper-color-edit";
+    if (!env.activeWallpaperPath.empty()) {
+      entries.back().subtitle = tr("settings.schema.wallpaper.wallpaper-colors.active") + ": "
+          + std::filesystem::path(env.activeWallpaperPath).filename().string();
+    }
+    for (const auto& entry : cfg.wallpaper.entries) {
+      if (entry.path.empty()) {
+        continue;
+      }
+      SettingEntry row = makeEntry(
+          SettingsSection::Wallpaper, "wallpaper-colors",
+          std::filesystem::path(entry.path).filename().string(),
+          tr("settings.schema.wallpaper.wallpaper-colors.saved-description"), {},
+          ButtonSetting{
+              .label = tr("settings.schema.wallpaper.wallpaper-colors.edit"),
+              .glyph = "edit",
+          },
+          "wallpaper colors palette per wallpaper saved"
+      );
+      row.actionId = "wallpaper-color-edit:" + entry.path;
+      entries.push_back(std::move(row));
+    }
+    entries.push_back(makeEntry(
         SettingsSection::Wallpaper, "general", tr("settings.schema.shared.enabled.label"),
         tr("settings.schema.wallpaper.enabled.description"), {"wallpaper", "enabled"},
         ToggleSetting{cfg.wallpaper.enabled}, "background image"
@@ -336,6 +368,11 @@ namespace settings::registry {
         SettingsSection::Wallpaper, "directories", tr("settings.schema.wallpaper.per-monitor-directories.label"),
         tr("settings.schema.wallpaper.per-monitor-directories.description"), {"wallpaper", "per_monitor_directories"},
         ToggleSetting{cfg.wallpaper.perMonitorDirectories}, "per display folder"
+    ));
+    entries.push_back(makeEntry(
+        SettingsSection::Wallpaper, "directories", tr("settings.schema.wallpaper.show-favorites-at-root.label"),
+        tr("settings.schema.wallpaper.show-favorites-at-root.description"), {"wallpaper", "show_favorites_at_root"},
+        ToggleSetting{cfg.wallpaper.showFavoritesAtRoot}, "favorites pinned root browser"
     ));
     for (const auto& outputOpt : env.availableOutputs) {
       const std::string& connector = outputOpt.value;
@@ -487,6 +524,48 @@ namespace settings::registry {
         {"wallpaper", "automation", "pause_on_fullscreen"}, ToggleSetting{cfg.wallpaper.automation.pauseOnFullscreen},
         "rotate slideshow game video"
     ));
+    {
+      auto addLinkedEntry = [&entries](std::string title, std::string subtitle, std::string actionId,
+                                            std::string searchText, std::string label) {
+        SettingEntry entry = makeEntry(
+            SettingsSection::Wallpaper, "linked-monitors", std::move(title), std::move(subtitle), {},
+            ButtonSetting{.label = std::move(label), .glyph = "edit"}, std::move(searchText)
+        );
+        entry.actionId = std::move(actionId);
+        entries.push_back(std::move(entry));
+      };
+      if (cfg.wallpaper.links.empty()) {
+        addLinkedEntry(
+            tr("settings.schema.wallpaper.linked-monitors.label"),
+            tr("settings.schema.wallpaper.linked-monitors.empty"), "wallpaper-link-add",
+            "linked monitors group sync", tr("settings.schema.wallpaper.linked-monitors.add")
+        );
+      } else {
+        for (const auto& group : cfg.wallpaper.links) {
+          const std::string name =
+              group.name.empty() ? group.id : group.name;
+          std::string colorSource = group.colorSource;
+          if (colorSource.empty() && !group.members.empty()) {
+            colorSource = group.members.front().monitor;
+          }
+          if (colorSource.empty()) {
+            colorSource = tr("settings.schema.wallpaper.linked-monitors.color-source-first");
+          }
+          const std::string subtitle = tr("settings.schema.wallpaper.linked-monitors.members") + ": "
+              + std::to_string(group.members.size()) + " · "
+              + tr("settings.schema.wallpaper.linked-monitors.color-source") + ": " + colorSource;
+          addLinkedEntry(
+              name, subtitle, "wallpaper-link-edit:" + group.id,
+              "linked monitors group sync " + name, tr("settings.schema.wallpaper.linked-monitors.edit")
+          );
+        }
+        addLinkedEntry(
+            tr("settings.schema.wallpaper.linked-monitors.label"),
+            tr("settings.schema.wallpaper.linked-monitors.description"), "wallpaper-link-add",
+            "linked monitors group sync add", tr("settings.schema.wallpaper.linked-monitors.add")
+        );
+      }
+    }
   }
 
   void addTemplateSettings(std::vector<SettingEntry>& entries, const Config& cfg) {

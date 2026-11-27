@@ -180,7 +180,16 @@ namespace noctalia::theme {
   void ThemeService::onConfigReload() { resolveAndSet(/*animate=*/true); }
 
   void ThemeService::onWallpaperChange() {
-    if (m_config.config().theme.source == PaletteSource::Wallpaper) {
+    const auto effective = m_config.effectiveThemeForWallpaper(m_config.getPaletteWallpaperPath());
+    if (effective.theme.source == PaletteSource::Wallpaper) {
+      // The image itself drives the palette, so a new wallpaper always regenerates it.
+      resolveAndSet(/*animate=*/true);
+      return;
+    }
+    // A per-wallpaper override can select a different non-wallpaper palette than the
+    // previous wallpaper. Re-resolve only when the effective theme actually changed,
+    // keeping the previous wallpaper-independent fast path.
+    if (!m_lastEffectiveTheme.has_value() || *m_lastEffectiveTheme != effective.theme) {
       resolveAndSet(/*animate=*/true);
     }
   }
@@ -424,14 +433,20 @@ namespace noctalia::theme {
     } else {
       m_wallpaperFailed = key;
     }
-    if (m_config.config().theme.source == PaletteSource::Wallpaper) {
+    if (m_config.effectiveThemeForWallpaper(m_config.getPaletteWallpaperPath()).theme.source
+        == PaletteSource::Wallpaper) {
       resolveAndSet(/*animate=*/true);
     }
   }
 
   void ThemeService::resolveAndSet(bool animate) {
     profiling::ScopedTimer t(kLog, "theme: resolveAndSet");
-    const auto& cfg = m_config.config().theme;
+    // Palette generation and the mode it runs in follow the effective theme of the
+    // wallpaper driving the palette, not the global [theme]. The resolver starts from
+    // global, so wallpapers without an override still track global changes.
+    const std::string wallpaperPath = m_config.getPaletteWallpaperPath();
+    const ThemeConfig cfg = m_config.effectiveThemeForWallpaper(wallpaperPath).theme;
+    m_lastEffectiveTheme = cfg;
     // [theme].mode is the app-facing mode; the shell either follows it or runs its own.
     // Both resolve `auto` against one schedule evaluation.
     std::optional<bool> scheduleNight;
@@ -461,7 +476,6 @@ namespace noctalia::theme {
     } else if (cfg.source == PaletteSource::Wallpaper) {
       // Startup snaps synchronously so the first frame never shows a different palette.
       // Afterwards a multi-second decode of a huge image must not block the event loop.
-      const std::string wallpaperPath = m_config.getPaletteWallpaperPath();
       WallpaperLookup lookup = animate ? lookupWallpaperGenerated(cfg, wallpaperPath)
                                        : WallpaperLookup{.generated = resolveWallpaperGenerated(cfg, wallpaperPath)};
       if (lookup.pending) {
@@ -570,7 +584,8 @@ namespace noctalia::theme {
   }
 
   bool ThemeService::hasAutoMode() const noexcept {
-    const auto& theme = m_config.config().theme;
+    // A per-wallpaper override may select auto mode without the global theme doing so.
+    const ThemeConfig theme = m_config.effectiveThemeForWallpaper(m_config.getPaletteWallpaperPath()).theme;
     return theme.mode == ThemeMode::Auto || shellThemeMode(theme) == ThemeMode::Auto;
   }
 
@@ -639,12 +654,12 @@ namespace noctalia::theme {
       return false;
     };
 
-    const auto& cfg = m_config.config().theme;
+    const std::string wallpaperPath = m_config.getPaletteWallpaperPath();
+    const ThemeConfig cfg = m_config.effectiveThemeForWallpaper(wallpaperPath).theme;
     if (cfg.source != PaletteSource::Wallpaper) {
       return fail("palette source is not wallpaper");
     }
 
-    const std::string wallpaperPath = m_config.getPaletteWallpaperPath();
     auto generated = resolveWallpaperGenerated(cfg, wallpaperPath);
     if (!generated) {
       return fail("failed to generate palette from wallpaper");

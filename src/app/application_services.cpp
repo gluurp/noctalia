@@ -1076,6 +1076,7 @@ void Application::initAuxServicesAndHooks() {
     m_backdrop.onStateChange();
     m_lockScreen.onWallpaperChanged();
     m_themeService.onWallpaperChange();
+    m_settingsWindow.onExternalOptionsChanged();
     if (m_panelManager.isOpenPanel("control-center")) {
       m_panelManager.refresh();
     }

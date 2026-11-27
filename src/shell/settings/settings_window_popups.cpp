@@ -25,7 +25,10 @@
 #include "shell/settings/settings_window.h"
 #include "shell/settings/template_store_content.h"
 #include "shell/settings/widget_settings_registry.h"
+#include "theme/builtin_palettes.h"
+#include "theme/community_palettes.h"
 #include "theme/community_templates.h"
+#include "theme/custom_palettes.h"
 #include "ui/builders.h"
 #include "ui/controls/button.h"
 #include "ui/controls/context_menu.h"
@@ -58,6 +61,15 @@ namespace {
   constexpr std::int32_t kActionSupportReport = 1;
   constexpr std::int32_t kActionExportConfig = 2;
   constexpr std::string_view kCalendarDiscoveryOwner = "calendar_discovery";
+
+  struct LinkedWallpaperDraft {
+    std::vector<WallpaperLinkGroup> groups;
+    std::size_t index = 0;
+    bool isNew = true;
+    bool pendingRemove = false;
+  };
+
+  std::string trimmedOrEmpty(std::string_view value) { return StringUtils::trim(value); }
 
   std::string calendarCredentialError(CalendarService::CredentialOperationResult result) {
     switch (result) {
@@ -770,6 +782,840 @@ void SettingsWindow::openMonitorOverrideCreateDialog(std::optional<std::string> 
   m_editorSheetModal->open(
       settings::SettingsSheetRequest{
           .sheetTitle = i18n::tr("settings.entities.monitor-override.new-title"),
+          .populateSheetBody = std::move(populate),
+          .scale = scale,
+      }
+  );
+}
+
+void SettingsWindow::openWallpaperColorEditor(std::string path) {
+  if (m_wayland == nullptr || m_renderContext == nullptr || m_surface == nullptr
+      || m_surface->xdgSurface() == nullptr || m_config == nullptr || path.empty()) {
+    return;
+  }
+  if (m_editorSheetModal != nullptr && m_editorSheetModal->isOpen()) {
+    m_editorSheetModal->close();
+  }
+  if (m_editorSheetModal == nullptr) {
+    m_editorSheetModal = std::make_unique<settings::SettingsSheetModal>();
+    m_editorSheetModal->initialize(m_modalHost, [this] { dismissOpenSelectDropdown(); });
+  }
+
+  struct Draft {
+    std::string path;
+    WallpaperColorOverride value;
+    bool removing = false;
+  };
+  auto draft = std::make_shared<Draft>();
+  draft->path = path;
+  if (const auto* entry = m_config->wallpaperColorEntryForPath(path); entry != nullptr) {
+    draft->value = *entry;
+  } else {
+    const WallpaperFavorite theme = [&] {
+      WallpaperFavorite result;
+      const auto effective = m_config->effectiveThemeForWallpaper(path).theme;
+      result.themeMode = effective.mode;
+      result.paletteSource = effective.source;
+      result.builtinPalette = effective.builtinPalette;
+      result.communityPalette = effective.communityPalette;
+      result.customPalette = effective.customPalette;
+      result.wallpaperScheme = effective.wallpaperScheme;
+      return result;
+    }();
+    draft->value.path = path;
+    draft->value.themeMode = theme.themeMode;
+    draft->value.paletteSource = theme.paletteSource;
+    draft->value.builtinPalette = theme.builtinPalette;
+    draft->value.communityPalette = theme.communityPalette;
+    draft->value.customPalette = theme.customPalette;
+    draft->value.wallpaperScheme = theme.wallpaperScheme;
+  }
+  if (!draft->value.paletteSource.has_value()) {
+    draft->value.paletteSource = m_config->config().theme.source;
+  }
+
+  const float scale = uiScale();
+  const auto rebuild = [this] {
+    if (m_editorSheetModal != nullptr) {
+      m_editorSheetModal->clearStatusMessage();
+      m_editorSheetModal->rebuildBody();
+    }
+  };
+  const auto setError = [this](std::string message) {
+    if (m_editorSheetModal != nullptr) {
+      m_editorSheetModal->setStatusMessage(std::move(message), true);
+    }
+  };
+
+  const std::array<PaletteSource, 4> sources = {
+      PaletteSource::Builtin, PaletteSource::Wallpaper, PaletteSource::Community, PaletteSource::Custom};
+  const std::array<const char*, 4> sourceKeys = {
+      "settings.options.theme.source.built-in", "settings.options.theme.source.wallpaper",
+      "settings.options.theme.source.community", "settings.options.theme.source.custom"};
+  const std::array<const char*, 4> sourceLabels = {
+      "settings.schema.appearance.builtin-palette.label",
+      "settings.schema.appearance.wallpaper-generation-scheme.label",
+      "settings.schema.appearance.community-palette.label",
+      "settings.schema.appearance.custom-palette.label"};
+  const std::array<ThemeMode, 3> modes = {ThemeMode::Dark, ThemeMode::Light, ThemeMode::Auto};
+  const std::array<const char*, 3> modeKeys = {
+      "settings.options.theme.mode.dark", "settings.options.theme.mode.light", "common.states.auto"};
+
+  const auto sourceIndex = [&sources](PaletteSource value) {
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+      if (sources[i] == value) {
+        return i;
+      }
+    }
+    return std::size_t{0};
+  };
+  const auto modeIndex = [&modes](ThemeMode value) {
+    for (std::size_t i = 0; i < modes.size(); ++i) {
+      if (modes[i] == value) {
+        return i;
+      }
+    }
+    return std::size_t{0};
+  };
+  const auto valueFor = [](const WallpaperColorOverride& v) -> std::string {
+    switch (v.paletteSource.value_or(PaletteSource::Builtin)) {
+    case PaletteSource::Builtin:
+      return v.builtinPalette;
+    case PaletteSource::Wallpaper:
+      return v.wallpaperScheme;
+    case PaletteSource::Community:
+      return v.communityPalette;
+    case PaletteSource::Custom:
+      return v.customPalette;
+    }
+    return {};
+  };
+
+  const auto populate = [this, scale, draft, sources, sourceKeys, sourceLabels, modes, modeKeys, sourceIndex,
+                         modeIndex, valueFor, rebuild, setError](Flex& body) {
+    const std::string filename = std::filesystem::path(draft->path).filename().string();
+    body.addChild(ui::label({
+        .text = filename,
+        .fontSize = Style::fontSizeBody * scale,
+        .fontWeight = FontWeight::Bold,
+        .color = colorSpecFromRole(ColorRole::OnSurface),
+    }));
+    body.addChild(ui::label({
+        .text = i18n::tr("settings.schema.wallpaper.wallpaper-colors.description"),
+        .fontSize = Style::fontSizeCaption * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+    }));
+
+    body.addChild(ui::label({
+        .text = i18n::tr("settings.schema.appearance.palette-source.label"),
+        .fontSize = Style::fontSizeBody * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurface),
+    }));
+    std::vector<std::string> sourceOptions;
+    for (const auto& key : sourceKeys) {
+      sourceOptions.push_back(i18n::tr(key));
+    }
+    Select* sourceSelect = nullptr;
+    body.addChild(ui::select({
+        .out = &sourceSelect,
+        .options = std::move(sourceOptions),
+        .fontSize = Style::fontSizeBody * scale,
+        .controlHeight = Style::controlHeight * scale,
+        .onSelectionChanged = [draft, sources, rebuild](std::size_t index, std::string_view) {
+          if (index < sources.size()) {
+            draft->value.paletteSource = sources[index];
+            rebuild();
+          }
+        },
+    }));
+    if (sourceSelect != nullptr) {
+      sourceSelect->setSelectedIndex(sourceIndex(draft->value.paletteSource.value_or(PaletteSource::Builtin)));
+    }
+    body.addChild(ui::label({
+        .text = i18n::tr("settings.schema.appearance.palette-source.description"),
+        .fontSize = Style::fontSizeCaption * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+    }));
+
+    const std::size_t sourcePos = sourceIndex(draft->value.paletteSource.value_or(PaletteSource::Builtin));
+    std::vector<std::string> paletteOptions;
+    switch (sources[sourcePos]) {
+    case PaletteSource::Builtin:
+      for (const auto& palette : noctalia::theme::builtinPalettes()) {
+        paletteOptions.push_back(std::string(palette.name));
+      }
+      break;
+    case PaletteSource::Wallpaper:
+      paletteOptions = {"m3-content", "m3-tonal-spot", "m3-fruit-salad", "m3-rainbow", "m3-monochrome",
+                        "vibrant", "faithful", "soft", "dysfunctional", "muted"};
+      break;
+    case PaletteSource::Community:
+      for (const auto& palette : noctalia::theme::availableCommunityPalettes()) {
+        paletteOptions.push_back(std::string(palette.name));
+      }
+      break;
+    case PaletteSource::Custom:
+      for (const auto& palette : noctalia::theme::availableCustomPalettes()) {
+        paletteOptions.push_back(std::string(palette.name));
+      }
+      break;
+    }
+    body.addChild(ui::label({
+        .text = i18n::tr(sourceLabels[sourcePos]),
+        .fontSize = Style::fontSizeBody * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurface),
+    }));
+    const std::string selectedValue = valueFor(draft->value);
+    std::size_t selectedIndex = 0;
+    for (std::size_t i = 0; i < paletteOptions.size(); ++i) {
+      if (paletteOptions[i] == selectedValue) {
+        selectedIndex = i;
+        break;
+      }
+    }
+    Select* paletteSelect = nullptr;
+    body.addChild(ui::select({
+        .out = &paletteSelect,
+        .options = std::move(paletteOptions),
+        .fontSize = Style::fontSizeBody * scale,
+        .controlHeight = Style::controlHeight * scale,
+        .onSelectionChanged = [draft](std::size_t, std::string_view value) {
+          switch (draft->value.paletteSource.value_or(PaletteSource::Builtin)) {
+          case PaletteSource::Builtin:
+            draft->value.builtinPalette = std::string(value);
+            break;
+          case PaletteSource::Wallpaper:
+            draft->value.wallpaperScheme = std::string(value);
+            break;
+          case PaletteSource::Community:
+            draft->value.communityPalette = std::string(value);
+            break;
+          case PaletteSource::Custom:
+            draft->value.customPalette = std::string(value);
+            break;
+          }
+        },
+    }));
+    if (paletteSelect != nullptr) {
+      paletteSelect->setSelectedIndex(selectedIndex);
+    }
+
+    body.addChild(ui::label({
+        .text = i18n::tr("settings.schema.appearance.theme-mode.label"),
+        .fontSize = Style::fontSizeBody * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurface),
+    }));
+    std::vector<ui::SegmentedOption> modeOptions;
+    for (const auto& key : modeKeys) {
+      modeOptions.push_back({.label = i18n::tr(key)});
+    }
+    body.addChild(ui::segmented({
+        .options = std::move(modeOptions),
+        .selectedIndex = modeIndex(draft->value.themeMode.value_or(m_config->config().theme.mode)),
+        .scale = scale,
+        .compact = true,
+        .onChange = [draft, modes](std::size_t index) {
+          if (index < modes.size()) {
+            draft->value.themeMode = modes[index];
+          }
+        },
+    }));
+
+    body.addChild(ui::row(
+        {.align = FlexAlign::Center, .justify = FlexJustify::End, .gap = Style::spaceSm * scale, .fillWidth = true},
+        ui::button({
+            .text = i18n::tr("common.actions.cancel"),
+            .fontSize = Style::fontSizeBody * scale,
+            .variant = ButtonVariant::Ghost,
+            .minHeight = Style::controlHeightSm * scale,
+            .paddingV = Style::spaceXs * scale,
+            .paddingH = Style::spaceSm * scale,
+            .styleRadius = Style::radiusSm,
+            .styleRadiusScale = scale,
+            .onClick = [this] {
+              if (m_editorSheetModal != nullptr) {
+                m_editorSheetModal->close();
+              }
+            },
+        }),
+        ui::button({
+            .text = i18n::tr("settings.schema.wallpaper.wallpaper-colors.use-global"),
+            .fontSize = Style::fontSizeBody * scale,
+            .variant = ButtonVariant::Default,
+            .minHeight = Style::controlHeightSm * scale,
+            .paddingV = Style::spaceXs * scale,
+            .paddingH = Style::spaceSm * scale,
+            .styleRadius = Style::radiusSm,
+            .styleRadiusScale = scale,
+            .onClick = [draft, rebuild] {
+              draft->removing = true;
+              rebuild();
+            },
+        }),
+        ui::button({
+            .text = i18n::tr("common.actions.apply"),
+            .fontSize = Style::fontSizeBody * scale,
+            .variant = ButtonVariant::Primary,
+            .minHeight = Style::controlHeightSm * scale,
+            .paddingV = Style::spaceXs * scale,
+            .paddingH = Style::spaceSm * scale,
+            .styleRadius = Style::radiusSm,
+            .styleRadiusScale = scale,
+            .onClick = [this, draft, valueFor, setError] {
+              if (draft->removing) {
+                const std::string path = draft->path;
+                if (m_config == nullptr) {
+                  return;
+                }
+                auto entries = m_config->config().wallpaper.entries;
+                std::erase_if(entries, [&](const WallpaperColorOverride& e) {
+                  return FileUtils::normalizeWallpaperPath(e.path) == FileUtils::normalizeWallpaperPath(path);
+                });
+                auto overrides = m_config->config().wallpaper.colorOverrides;
+                std::erase_if(overrides, [&](const WallpaperColorOverride& e) {
+                  return !e.path.empty()
+                      && FileUtils::normalizeWallpaperPath(e.path) == FileUtils::normalizeWallpaperPath(path);
+                });
+                if (!m_config->setWallpaperColorEntries(entries)) {
+                  setError(i18n::tr("settings.schema.wallpaper.wallpaper-colors.save-failed"));
+                  return;
+                }
+                if (!m_config->setWallpaperColorOverrides(overrides)) {
+                  setError(i18n::tr("settings.schema.wallpaper.wallpaper-colors.save-failed"));
+                  return;
+                }
+                m_config->clearWallpaperFavoritePalette(path);
+                if (m_editorSheetModal != nullptr) {
+                  m_editorSheetModal->close();
+                }
+                requestContentRebuild(true, true);
+                return;
+              }
+              const std::string value = valueFor(draft->value);
+              if (value.empty()) {
+                setError(i18n::tr("settings.schema.wallpaper.wallpaper-colors.missing-value"));
+                return;
+              }
+              auto entries = m_config->config().wallpaper.entries;
+              std::erase_if(entries, [&](const WallpaperColorOverride& e) {
+                return FileUtils::normalizeWallpaperPath(e.path)
+                    == FileUtils::normalizeWallpaperPath(draft->path);
+              });
+              entries.push_back(draft->value);
+              if (m_config == nullptr || !m_config->setWallpaperColorEntries(entries)) {
+                setError(i18n::tr("settings.schema.wallpaper.wallpaper-colors.save-failed"));
+                return;
+              }
+              if (m_editorSheetModal != nullptr) {
+                m_editorSheetModal->close();
+              }
+              requestContentRebuild(true, true);
+            },
+        })
+    ));
+  };
+
+  m_editorSheetModal->open(settings::SettingsSheetRequest{
+      .sheetTitle = i18n::tr("settings.schema.wallpaper.wallpaper-colors.title"),
+      .populateSheetBody = populate,
+      .scale = scale,
+  });
+}
+
+void SettingsWindow::openLinkedWallpaperEditor(std::optional<std::string> groupId) {
+  if (m_wayland == nullptr
+      || m_renderContext == nullptr
+      || m_surface == nullptr
+      || m_surface->xdgSurface() == nullptr
+      || m_config == nullptr) {
+    return;
+  }
+  if (m_editorSheetModal != nullptr && m_editorSheetModal->isOpen()) {
+    m_editorSheetModal->close();
+  }
+  if (m_searchPickerPopup != nullptr && m_searchPickerPopup->isOpen()) {
+    m_searchPickerPopup->close();
+  }
+  if (m_editorSheetModal == nullptr) {
+    m_editorSheetModal = std::make_unique<settings::SettingsSheetModal>();
+    m_editorSheetModal->initialize(m_modalHost, [this] { dismissOpenSelectDropdown(); });
+  }
+
+  const float scale = uiScale();
+  const std::vector<settings::SelectOption> outputs = availableOutputs();
+  auto draft = std::make_shared<LinkedWallpaperDraft>();
+  draft->groups = m_config->config().wallpaper.links;
+  if (groupId.has_value()) {
+    const auto it = std::ranges::find(draft->groups, *groupId, &WallpaperLinkGroup::id);
+    if (it == draft->groups.end()) {
+      return;
+    }
+    draft->index = static_cast<std::size_t>(it - draft->groups.begin());
+    draft->isNew = false;
+  } else {
+    WallpaperLinkGroup group;
+    group.hideOriginals = true;
+    WallpaperLinkMember member;
+    if (!outputs.empty()) {
+      member.monitor = outputs.front().value;
+    }
+    group.members.push_back(std::move(member));
+    draft->groups.push_back(std::move(group));
+    draft->index = draft->groups.size() - 1;
+  }
+
+  const auto rebuild = [this] {
+    if (m_editorSheetModal != nullptr) {
+      m_editorSheetModal->clearStatusMessage();
+      m_editorSheetModal->rebuildBody();
+    }
+  };
+  const auto setError = [this](std::string message) {
+    if (m_editorSheetModal != nullptr) {
+      m_editorSheetModal->setStatusMessage(std::move(message), true);
+    }
+  };
+
+  const auto populate = [this, scale, draft, outputs, rebuild, setError](Flex& body) {
+    auto& group = draft->groups[draft->index];
+
+    body.addChild(
+        ui::label({
+            .text = i18n::tr("settings.schema.wallpaper.linked-monitors.name"),
+            .fontSize = Style::fontSizeCaption * scale,
+            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        })
+    );
+    Input* nameInput = nullptr;
+    auto nameField = ui::input({
+        .out = &nameInput,
+        .value = group.name,
+        .placeholder = i18n::tr("settings.schema.wallpaper.linked-monitors.name-placeholder"),
+        .fontSize = Style::fontSizeBody * scale,
+        .controlHeight = Style::controlHeight * scale,
+        .horizontalPadding = Style::spaceSm * scale,
+        .height = Style::controlHeight * scale,
+        .flexGrow = 1.0F,
+    });
+    nameInput->setOnChange([draft](const std::string& value) { draft->groups[draft->index].name = value; });
+    body.addChild(std::move(nameField));
+
+    body.addChild(
+        ui::row(
+            {
+                .align = FlexAlign::Center,
+                .gap = Style::spaceSm * scale,
+            },
+            ui::label({
+                .text = i18n::tr("settings.schema.wallpaper.linked-monitors.hide-originals"),
+                .fontSize = Style::fontSizeBody * scale,
+                .color = colorSpecFromRole(ColorRole::OnSurface),
+                .flexGrow = 1.0F,
+            }),
+            ui::toggle({
+                .checked = group.hideOriginals,
+                .scale = scale,
+                .onChange =
+                    [draft, rebuild](bool checked) {
+                      draft->groups[draft->index].hideOriginals = checked;
+                      rebuild();
+                    },
+            })
+        )
+    );
+    body.addChild(
+        ui::label({
+            .text = i18n::tr("settings.schema.wallpaper.linked-monitors.hide-originals-description"),
+            .fontSize = Style::fontSizeCaption * scale,
+            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        })
+    );
+
+    body.addChild(
+        ui::label({
+            .text = i18n::tr("settings.schema.wallpaper.linked-monitors.color-source"),
+            .fontSize = Style::fontSizeCaption * scale,
+            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        })
+    );
+    Flex* colorRow = nullptr;
+    body.addChild(
+        ui::row({
+            .out = &colorRow,
+            .align = FlexAlign::Center,
+            .wrap = true,
+            .gap = Style::spaceXs * scale,
+            .fillWidth = true,
+        })
+    );
+    const auto addColorPill = [&](std::string text, std::string value) {
+      const bool selected = group.colorSource == value;
+      colorRow->addChild(
+          ui::button({
+              .text = std::move(text),
+              .fontSize = Style::fontSizeBody * scale,
+              .variant = selected ? ButtonVariant::Primary : ButtonVariant::Default,
+              .minHeight = Style::controlHeight * scale,
+              .paddingV = Style::spaceXs * scale,
+              .paddingH = Style::spaceMd * scale,
+              .styleRadius = Style::radiusMd,
+              .styleRadiusScale = scale,
+              .onClick =
+                  [draft, value = std::move(value), rebuild] {
+                    draft->groups[draft->index].colorSource = value;
+                    rebuild();
+                  },
+          })
+      );
+    };
+    addColorPill(i18n::tr("settings.schema.wallpaper.linked-monitors.color-source-first"), {});
+    std::vector<std::string> seen;
+    for (const auto& member : group.members) {
+      if (member.monitor.empty() || std::ranges::contains(seen, member.monitor)) {
+        continue;
+      }
+      seen.push_back(member.monitor);
+      addColorPill(member.monitor, member.monitor);
+    }
+
+    body.addChild(
+        ui::label({
+            .text = i18n::tr("settings.schema.wallpaper.linked-monitors.members"),
+            .fontSize = Style::fontSizeCaption * scale,
+            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        })
+    );
+    for (std::size_t i = 0; i < group.members.size(); ++i) {
+      auto& member = group.members[i];
+      auto memberRow = ui::column({
+          .align = FlexAlign::Stretch,
+          .gap = Style::spaceXs * scale,
+          .padding = Style::spaceSm * scale,
+          .configure = [scale](Flex& row) {
+            row.setStyleRadius(Style::radiusSm, scale);
+            row.setFill(colorSpecFromRole(ColorRole::SurfaceContainerLow));
+            row.setBorder(colorSpecFromRole(ColorRole::OutlineVariant), Style::borderWidth);
+          },
+      });
+
+      if (outputs.empty()) {
+        Input* monitorInput = nullptr;
+        auto monitorField = ui::input({
+            .out = &monitorInput,
+            .value = member.monitor,
+            .placeholder = i18n::tr("settings.schema.wallpaper.linked-monitors.monitor"),
+            .fontSize = Style::fontSizeBody * scale,
+            .controlHeight = Style::controlHeight * scale,
+            .horizontalPadding = Style::spaceSm * scale,
+            .height = Style::controlHeight * scale,
+            .flexGrow = 1.0F,
+        });
+        monitorInput->setOnChange(
+            [draft, i](const std::string& value) { draft->groups[draft->index].members[i].monitor = value; }
+        );
+        memberRow->addChild(std::move(monitorField));
+      } else {
+        std::vector<std::string> labels;
+        labels.reserve(outputs.size());
+        std::optional<std::size_t> selected;
+        for (std::size_t o = 0; o < outputs.size(); ++o) {
+          labels.push_back(outputs[o].value);
+          if (outputs[o].value == member.monitor) {
+            selected = o;
+          }
+        }
+        auto monitorSelect = ui::select({
+            .options = std::move(labels),
+            .selectedIndex = selected,
+            .clearSelection = !selected.has_value(),
+            .placeholder = i18n::tr("settings.schema.wallpaper.linked-monitors.monitor"),
+            .fontSize = Style::fontSizeBody * scale,
+            .controlHeight = Style::controlHeight * scale,
+            .glyphSize = Style::fontSizeBody * scale,
+            .onSelectionChanged =
+                [draft, i, outputs, rebuild](std::size_t selectedIndex, std::string_view) {
+                  if (selectedIndex < outputs.size()) {
+                    draft->groups[draft->index].members[i].monitor = outputs[selectedIndex].value;
+                    rebuild();
+                  }
+                },
+            .configure = [](Select& select) { select.setFillWidth(true); },
+        });
+        memberRow->addChild(std::move(monitorSelect));
+      }
+
+      Input* directoryInput = nullptr;
+      auto directoryField = ui::input({
+          .out = &directoryInput,
+          .value = member.directory,
+          .placeholder = i18n::tr("settings.schema.wallpaper.linked-monitors.directory"),
+          .fontSize = Style::fontSizeBody * scale,
+          .controlHeight = Style::controlHeight * scale,
+          .horizontalPadding = Style::spaceSm * scale,
+          .height = Style::controlHeight * scale,
+          .flexGrow = 1.0F,
+      });
+      directoryInput->setOnChange(
+          [draft, i](const std::string& value) { draft->groups[draft->index].members[i].directory = value; }
+      );
+      memberRow->addChild(std::move(directoryField));
+
+      memberRow->addChild(
+          ui::row(
+              {
+                  .align = FlexAlign::Center,
+                  .justify = FlexJustify::End,
+              },
+              ui::button({
+                  .text = i18n::tr("settings.schema.wallpaper.linked-monitors.member-remove"),
+                  .fontSize = Style::fontSizeCaption * scale,
+                  .variant = ButtonVariant::Ghost,
+                  .minHeight = Style::controlHeightSm * scale,
+                  .paddingV = Style::spaceXs * scale,
+                  .paddingH = Style::spaceSm * scale,
+                  .styleRadius = Style::radiusSm,
+                  .styleRadiusScale = scale,
+                  .onClick =
+                      [draft, i, rebuild] {
+                        auto& members = draft->groups[draft->index].members;
+                        if (i < members.size()) {
+                          members.erase(members.begin() + static_cast<std::ptrdiff_t>(i));
+                          rebuild();
+                        }
+                      },
+              })
+          )
+      );
+      body.addChild(std::move(memberRow));
+    }
+
+    body.addChild(
+        ui::button({
+            .text = i18n::tr("settings.schema.wallpaper.linked-monitors.member-add"),
+            .fontSize = Style::fontSizeBody * scale,
+            .variant = ButtonVariant::Default,
+            .minHeight = Style::controlHeight * scale,
+            .paddingV = Style::spaceXs * scale,
+            .paddingH = Style::spaceMd * scale,
+            .styleRadius = Style::radiusMd,
+            .styleRadiusScale = scale,
+            .onClick =
+                [draft, rebuild] {
+                  WallpaperLinkMember member;
+                  auto& groupRef = draft->groups[draft->index];
+                  if (!groupRef.members.empty() && groupRef.members.back().monitor.empty()) {
+                    return;
+                  }
+                  groupRef.members.push_back(std::move(member));
+                  rebuild();
+                },
+        })
+    );
+
+    const auto save = [this, draft, setError] {
+      auto& edited = draft->groups[draft->index];
+      const std::string name = trimmedOrEmpty(edited.name);
+      if (name.empty()) {
+        setError(i18n::tr("settings.schema.wallpaper.linked-monitors.validation-name"));
+        return;
+      }
+      std::vector<WallpaperLinkMember> members;
+      std::unordered_set<std::string> seenMonitors;
+      for (auto member : edited.members) {
+        member.monitor = trimmedOrEmpty(member.monitor);
+        member.directory = trimmedOrEmpty(member.directory);
+        if (member.monitor.empty() && member.directory.empty()) {
+          continue;
+        }
+        if (member.monitor.empty() || member.directory.empty()) {
+          setError(i18n::tr("settings.schema.wallpaper.linked-monitors.validation-members"));
+          return;
+        }
+        if (!seenMonitors.insert(member.monitor).second) {
+          setError(
+              i18n::tr(
+                  "settings.schema.wallpaper.linked-monitors.validation-duplicate-monitor", "monitor", member.monitor
+              )
+          );
+          return;
+        }
+        std::error_code ec;
+        if (!std::filesystem::is_directory(member.directory, ec)) {
+          setError(i18n::tr("settings.schema.wallpaper.linked-monitors.validation-directory"));
+          return;
+        }
+        members.push_back(std::move(member));
+      }
+      if (members.empty()) {
+        setError(i18n::tr("settings.schema.wallpaper.linked-monitors.validation-members"));
+        return;
+      }
+
+      edited.name = name;
+      if (edited.id.empty()) {
+        edited.id = name;
+      }
+      std::string uniqueId = edited.id;
+      int suffix = 2;
+      while (std::ranges::any_of(
+          draft->groups, [&](const WallpaperLinkGroup& other) {
+            return &other != &edited && other.id == uniqueId;
+          }
+      )) {
+        uniqueId = name + "-" + std::to_string(suffix++);
+      }
+      edited.id = uniqueId;
+      edited.members = std::move(members);
+      if (!edited.colorSource.empty() && !std::ranges::contains(edited.members, edited.colorSource, &WallpaperLinkMember::monitor)) {
+        edited.colorSource.clear();
+      }
+
+      if (m_config == nullptr || !m_config->setWallpaperLinkGroups(draft->groups)) {
+        setError(
+            m_config != nullptr && !m_config->lastMutationError().empty()
+                ? m_config->lastMutationError()
+                : i18n::tr("settings.schema.wallpaper.linked-monitors.save-failed")
+        );
+        return;
+      }
+      if (m_editorSheetModal != nullptr) {
+        m_editorSheetModal->close();
+      }
+      requestContentRebuild(/*refreshRegistry=*/true, /*refreshFilterRow=*/true);
+    };
+
+    if (!draft->isNew) {
+      if (draft->pendingRemove) {
+        body.addChild(
+            ui::column(
+                {
+                    .align = FlexAlign::Stretch,
+                    .gap = Style::spaceXs * scale,
+                    .padding = Style::spaceSm * scale,
+                    .configure = [scale](Flex& panel) {
+                      panel.setStyleRadius(Style::radiusSm, scale);
+                      panel.setFill(colorSpecFromRole(ColorRole::ErrorContainer));
+                      panel.setBorder(colorSpecFromRole(ColorRole::Error), Style::borderWidth);
+                    },
+                },
+                ui::label({
+                    .text = i18n::tr("settings.schema.wallpaper.linked-monitors.remove-confirm"),
+                    .fontSize = Style::fontSizeBody * scale,
+                    .color = colorSpecFromRole(ColorRole::OnErrorContainer),
+                }),
+                ui::row(
+                    {
+                        .align = FlexAlign::Center,
+                        .justify = FlexJustify::End,
+                        .gap = Style::spaceSm * scale,
+                    },
+                    ui::button({
+                        .text = i18n::tr("common.actions.cancel"),
+                        .fontSize = Style::fontSizeBody * scale,
+                        .variant = ButtonVariant::Ghost,
+                        .minHeight = Style::controlHeightSm * scale,
+                        .paddingV = Style::spaceXs * scale,
+                        .paddingH = Style::spaceSm * scale,
+                        .styleRadius = Style::radiusSm,
+                        .styleRadiusScale = scale,
+                        .onClick =
+                            [draft, rebuild] {
+                              draft->pendingRemove = false;
+                              rebuild();
+                            },
+                    }),
+                    ui::button({
+                        .text = i18n::tr("settings.schema.wallpaper.linked-monitors.remove-confirm-button"),
+                        .fontSize = Style::fontSizeBody * scale,
+                        .variant = ButtonVariant::Primary,
+                        .minHeight = Style::controlHeightSm * scale,
+                        .paddingV = Style::spaceXs * scale,
+                        .paddingH = Style::spaceSm * scale,
+                        .styleRadius = Style::radiusSm,
+                        .styleRadiusScale = scale,
+                        .onClick =
+                            [this, draft, setError] {
+                              auto next = draft->groups;
+                              next.erase(next.begin() + static_cast<std::ptrdiff_t>(draft->index));
+                              if (m_config == nullptr || !m_config->setWallpaperLinkGroups(next)) {
+                                setError(
+                                    m_config != nullptr && !m_config->lastMutationError().empty()
+                                        ? m_config->lastMutationError()
+                                        : i18n::tr("settings.schema.wallpaper.linked-monitors.save-failed")
+                                );
+                                return;
+                              }
+                              if (m_editorSheetModal != nullptr) {
+                                m_editorSheetModal->close();
+                              }
+                              requestContentRebuild(/*refreshRegistry=*/true, /*refreshFilterRow=*/true);
+                            },
+                    })
+                )
+            )
+        );
+      } else {
+        body.addChild(
+            ui::button({
+                .text = i18n::tr("settings.schema.wallpaper.linked-monitors.remove"),
+                .fontSize = Style::fontSizeBody * scale,
+                .variant = ButtonVariant::Ghost,
+                .minHeight = Style::controlHeight * scale,
+                .paddingV = Style::spaceXs * scale,
+                .paddingH = Style::spaceMd * scale,
+                .styleRadius = Style::radiusMd,
+                .styleRadiusScale = scale,
+                .onClick =
+                    [draft, rebuild] {
+                      draft->pendingRemove = true;
+                      rebuild();
+                    },
+            })
+        );
+      }
+    }
+
+    body.addChild(
+        ui::row(
+            {
+                .align = FlexAlign::Center,
+                .justify = FlexJustify::End,
+                .gap = Style::spaceSm * scale,
+            },
+            ui::button({
+                .text = i18n::tr("common.actions.cancel"),
+                .fontSize = Style::fontSizeBody * scale,
+                .variant = ButtonVariant::Ghost,
+                .minHeight = Style::controlHeight * scale,
+                .paddingV = Style::spaceXs * scale,
+                .paddingH = Style::spaceMd * scale,
+                .styleRadius = Style::radiusMd,
+                .styleRadiusScale = scale,
+                .onClick =
+                    [this] {
+                      if (m_editorSheetModal != nullptr) {
+                        m_editorSheetModal->close();
+                      }
+                    },
+            }),
+            ui::button({
+                .text = i18n::tr("common.actions.apply"),
+                .fontSize = Style::fontSizeBody * scale,
+                .variant = ButtonVariant::Primary,
+                .minHeight = Style::controlHeight * scale,
+                .paddingV = Style::spaceXs * scale,
+                .paddingH = Style::spaceMd * scale,
+                .styleRadius = Style::radiusMd,
+                .styleRadiusScale = scale,
+                .onClick = save,
+            })
+        )
+    );
+  };
+
+  m_editorSheetModal->open(
+      settings::SettingsSheetRequest{
+          .sheetTitle = i18n::tr("settings.schema.wallpaper.linked-monitors.label"),
           .populateSheetBody = std::move(populate),
           .scale = scale,
       }

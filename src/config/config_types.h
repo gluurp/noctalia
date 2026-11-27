@@ -581,6 +581,34 @@ struct WallpaperMonitorOverride {
   bool operator==(const WallpaperMonitorOverride&) const = default;
 };
 
+// One monitor/folder pair inside a linked wallpaper group. Matching uses the
+// exact path relative to `directory`, including the extension.
+struct WallpaperLinkMember {
+  std::string monitor;   // exact connector name
+  std::string directory; // browse/mapping directory
+  std::optional<std::string> directoryLight;
+  std::optional<std::string> directoryDark;
+
+  bool operator==(const WallpaperLinkMember&) const = default;
+};
+
+// A named set of monitor/folder pairs. Selecting a file from the group folder
+// applies the matching relative path to every member.
+struct WallpaperLinkGroup {
+  std::string id;          // table key identity (not serialized as a field)
+  std::string name;        // display label; falls back to id when empty
+  std::string colorSource; // connector; empty = first member
+  bool hideOriginals = true;
+  std::vector<WallpaperLinkMember> members;
+
+  bool operator==(const WallpaperLinkGroup&) const = default;
+};
+
+// Sparse per-wallpaper or per-set palette override. Defined after ThemeMode and
+// PaletteSource below; a pointer/vector of the incomplete type is fine inside
+// WallpaperConfig because the full definition is in this same header.
+struct WallpaperColorOverride;
+
 struct WallpaperAutomationConfig {
   enum class Order : std::uint8_t {
     Random = 0,
@@ -614,8 +642,16 @@ struct WallpaperConfig {
   std::string directoryLight;  // empty = directory
   std::string directoryDark;   // empty = directory
   bool perMonitorDirectories = false;
+  // Show the pinned favorites block above the browse root. Off by default so the
+  // root lists folders and images only; favorites stay reachable inside folders.
+  bool showFavoritesAtRoot = false;
   WallpaperAutomationConfig automation;
   std::vector<WallpaperMonitorOverride> monitorOverrides;
+  std::vector<WallpaperLinkGroup> links;
+  // Per-wallpaper palette configuration, independent of favorites.
+  std::vector<WallpaperColorOverride> entries;
+  // Legacy path/set overrides; still read, never written by the new UI.
+  std::vector<WallpaperColorOverride> colorOverrides;
 
   bool operator==(const WallpaperConfig&) const = default;
 };
@@ -1814,6 +1850,23 @@ enum class TerminalColors : std::uint8_t {
 constexpr EnumOption<TerminalColors> kTerminalColorsOptions[] = {
     {TerminalColors::Palette, "palette", "settings.options.theme.terminal-colors.palette"},
     {TerminalColors::Standard, "standard", "settings.options.theme.terminal-colors.standard"},
+};
+
+// Sparse palette override for one wallpaper path, or for one linked group
+// ("set"). Only present fields override the global [theme]; `path` and
+// `linkGroup`+`match` are mutually exclusive.
+struct WallpaperColorOverride {
+  std::string path;
+  std::string linkGroup;
+  std::string match; // group-relative path, basename fallback
+  std::optional<ThemeMode> themeMode;
+  std::optional<PaletteSource> paletteSource;
+  std::string builtinPalette;
+  std::string communityPalette;
+  std::string customPalette;
+  std::string wallpaperScheme;
+
+  bool operator==(const WallpaperColorOverride&) const = default;
 };
 
 struct WallpaperFavorite {

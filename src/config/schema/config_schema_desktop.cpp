@@ -5,8 +5,12 @@
 #include "config/schema/engine.h"
 #include "config/schema/ranges.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 
 namespace noctalia::config::schema {
 
@@ -132,6 +136,195 @@ namespace noctalia::config::schema {
       };
       return s;
     }
+
+    // An optional array-of-tables field: absent means "no entries", and an empty
+    // vector writes nothing instead of `member = []`.
+    template <typename Parent, typename Elem>
+    Field<Parent> optionalArrayOf(
+        std::vector<Elem> Parent::* member, std::string_view key, const Schema<Elem>& subSchema,
+        std::function<bool(const Elem&)> keep
+    ) {
+      Field<Parent> f = arrayOf<Parent, Elem>(member, key, subSchema, keep);
+      auto baseRead = f.read;
+      auto baseWrite = f.write;
+      f.read = [baseRead = std::move(baseRead), key](
+                   const toml::table& tbl, Parent& out, std::string_view parentPath, Diagnostics& diag
+               ) {
+        if (!tbl.contains(key)) {
+          return;
+        }
+        baseRead(tbl, out, parentPath, diag);
+      };
+      f.write = [baseWrite = std::move(baseWrite), key, member](toml::table& tbl, const Parent& in) {
+        if (!tbl.contains(key) && (in.*member).empty()) {
+          return;
+        }
+        if ((in.*member).empty()) {
+          tbl.erase(key);
+          return;
+        }
+        baseWrite(tbl, in);
+      };
+      return f;
+    }
+
+    template <typename Struct>
+    Field<Struct> optionalEnumStringField(
+        std::optional<ThemeMode> Struct::* member, std::string_view key, const EnumOption<ThemeMode>* options,
+        std::size_t optionCount
+    ) {
+      return custom<Struct>(
+          key,
+          [member, key, options, optionCount](
+              const toml::table& tbl, Struct& out, std::string_view parentPath, Diagnostics& diag
+          ) {
+            if (auto v = tbl[key].value<std::string>()) {
+              const std::string lowered = StringUtils::toLower(StringUtils::trim(*v));
+              std::optional<ThemeMode> parsed;
+              for (std::size_t i = 0; i < optionCount; ++i) {
+                if (options[i].key == lowered) {
+                  parsed = options[i].value;
+                  break;
+                }
+              }
+              if (parsed.has_value()) {
+                out.*member = *parsed;
+              } else {
+                diag.warn(joinPath(parentPath, key), "unknown value \"" + *v + "\"");
+              }
+            } else if (tbl.contains(key)) {
+              warnWrongType(tbl, key, parentPath, diag, "a string");
+            }
+          },
+          [member, key, options, optionCount](toml::table& tbl, const Struct& in) {
+            if (!(in.*member).has_value()) {
+              return;
+            }
+            for (std::size_t i = 0; i < optionCount; ++i) {
+              if (options[i].value == *(in.*member)) {
+                tbl.insert_or_assign(key, std::string(options[i].key));
+                return;
+              }
+            }
+          }
+      );
+    }
+
+    template <typename Struct>
+    Field<Struct> optionalEnumStringField(
+        std::optional<PaletteSource> Struct::* member, std::string_view key,
+        const EnumOption<PaletteSource>* options, std::size_t optionCount
+    ) {
+      return custom<Struct>(
+          key,
+          [member, key, options, optionCount](
+              const toml::table& tbl, Struct& out, std::string_view parentPath, Diagnostics& diag
+          ) {
+            if (auto v = tbl[key].value<std::string>()) {
+              const std::string lowered = StringUtils::toLower(StringUtils::trim(*v));
+              std::optional<PaletteSource> parsed;
+              for (std::size_t i = 0; i < optionCount; ++i) {
+                if (options[i].key == lowered) {
+                  parsed = options[i].value;
+                  break;
+                }
+              }
+              if (parsed.has_value()) {
+                out.*member = *parsed;
+              } else {
+                diag.warn(joinPath(parentPath, key), "unknown value \"" + *v + "\"");
+              }
+            } else if (tbl.contains(key)) {
+              warnWrongType(tbl, key, parentPath, diag, "a string");
+            }
+          },
+          [member, key, options, optionCount](toml::table& tbl, const Struct& in) {
+            if (!(in.*member).has_value()) {
+              return;
+            }
+            for (std::size_t i = 0; i < optionCount; ++i) {
+              if (options[i].value == *(in.*member)) {
+                tbl.insert_or_assign(key, std::string(options[i].key));
+                return;
+              }
+            }
+          }
+      );
+    }
+
+    const Schema<WallpaperLinkMember>& wallpaperLinkMemberSchema() {
+      static const Schema<WallpaperLinkMember> s = {
+          pathStringField(&WallpaperLinkMember::monitor, "monitor"),
+          pathStringField(&WallpaperLinkMember::directory, "directory"),
+          optionalPathStringField(&WallpaperLinkMember::directoryLight, "directory_light"),
+          optionalPathStringField(&WallpaperLinkMember::directoryDark, "directory_dark"),
+      };
+      return s;
+    }
+
+    const Schema<WallpaperLinkGroup>& wallpaperLinkGroupSchema() {
+      static const Schema<WallpaperLinkGroup> s = {
+          field(&WallpaperLinkGroup::name, "name"),
+          field(&WallpaperLinkGroup::colorSource, "color_source"),
+          field(&WallpaperLinkGroup::hideOriginals, "hide_originals"),
+          optionalArrayOf<WallpaperLinkGroup, WallpaperLinkMember>(
+              &WallpaperLinkGroup::members, "member", wallpaperLinkMemberSchema(),
+              [](const WallpaperLinkMember& m) { return !m.monitor.empty() && !m.directory.empty(); }
+          ),
+          finalize<WallpaperLinkGroup>([](WallpaperLinkGroup& group, std::string_view parentPath, Diagnostics& diag) {
+            if (!group.colorSource.empty()
+                && std::ranges::none_of(
+                    group.members, [&](const WallpaperLinkMember& m) { return m.monitor == group.colorSource; }
+                )) {
+              diag.warn(
+                  joinPath(parentPath, "color_source"),
+                  "does not name a member monitor (\"" + group.colorSource + "\")"
+              );
+            }
+            std::unordered_set<std::string> seen;
+            for (const auto& member : group.members) {
+              if (!seen.insert(member.monitor).second) {
+                diag.warn(
+                    joinPath(parentPath, "member"), "monitor \"" + member.monitor + "\" appears more than once"
+                );
+              }
+            }
+          }),
+      };
+      return s;
+    }
+
+    const Schema<WallpaperColorOverride>& wallpaperColorOverrideSchema() {
+      static const Schema<WallpaperColorOverride> s = {
+          pathStringField(&WallpaperColorOverride::path, "path"),
+          field(&WallpaperColorOverride::linkGroup, "link_group"),
+          field(&WallpaperColorOverride::match, "match"),
+          optionalEnumStringField(
+              &WallpaperColorOverride::themeMode, "theme_mode", kThemeModes, std::size(kThemeModes)
+          ),
+          optionalEnumStringField(
+              &WallpaperColorOverride::paletteSource, "palette_source", kPaletteSources, std::size(kPaletteSources)
+          ),
+          field(&WallpaperColorOverride::builtinPalette, "builtin_palette"),
+          field(&WallpaperColorOverride::communityPalette, "community_palette"),
+          field(&WallpaperColorOverride::customPalette, "custom_palette"),
+          field(&WallpaperColorOverride::wallpaperScheme, "wallpaper_scheme"),
+          finalize<WallpaperColorOverride>(
+              [](WallpaperColorOverride& overrideValue, std::string_view parentPath, Diagnostics& diag) {
+                const bool hasPath = !overrideValue.path.empty();
+                const bool hasSet = !overrideValue.linkGroup.empty() || !overrideValue.match.empty();
+                if (hasPath && hasSet) {
+                  diag.warn(std::string(parentPath), "path and link_group/match are mutually exclusive");
+                }
+                if (!hasPath && (!overrideValue.linkGroup.empty() != !overrideValue.match.empty())) {
+                  diag.warn(std::string(parentPath), "link_group and match must be provided together");
+                }
+              }
+          ),
+      };
+      return s;
+    }
+
   } // namespace
 
   const Schema<WallpaperConfig>& wallpaperSchema() {
@@ -150,11 +343,28 @@ namespace noctalia::config::schema {
         pathStringField(&WallpaperConfig::directoryLight, "directory_light"),
         pathStringField(&WallpaperConfig::directoryDark, "directory_dark"),
         field(&WallpaperConfig::perMonitorDirectories, "per_monitor_directories"),
+        field(&WallpaperConfig::showFavoritesAtRoot, "show_favorites_at_root"),
         subTable(&WallpaperConfig::automation, "automation", wallpaperAutomationSchema()),
         namedMap<WallpaperConfig, WallpaperMonitorOverride>(
             &WallpaperConfig::monitorOverrides, "monitor", wallpaperMonitorSchema(),
             [](WallpaperMonitorOverride& o, std::string_view name) { o.match = std::string(name); },
             [](const WallpaperMonitorOverride& o) { return o.match; }
+        ),
+        namedMap<WallpaperConfig, WallpaperLinkGroup>(
+            &WallpaperConfig::links, "link", wallpaperLinkGroupSchema(),
+            [](WallpaperLinkGroup& group, std::string_view name) { group.id = std::string(name); },
+            [](const WallpaperLinkGroup& group) { return group.id; }
+        ),
+        optionalArrayOf<WallpaperConfig, WallpaperColorOverride>(
+            &WallpaperConfig::entries, "entry", wallpaperColorOverrideSchema(),
+            [](const WallpaperColorOverride& entry) { return !entry.path.empty(); }
+        ),
+        optionalArrayOf<WallpaperConfig, WallpaperColorOverride>(
+            &WallpaperConfig::colorOverrides, "color_override", wallpaperColorOverrideSchema(),
+            [](const WallpaperColorOverride& overrideValue) {
+              return !overrideValue.path.empty()
+                  || (!overrideValue.linkGroup.empty() && !overrideValue.match.empty());
+            }
         ),
     };
     return s;

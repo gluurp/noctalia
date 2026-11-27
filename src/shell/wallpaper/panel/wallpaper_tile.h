@@ -94,6 +94,7 @@ private:
   Box* m_thumbHost = nullptr;
   Image* m_thumb = nullptr;
   Glyph* m_starGlyph = nullptr;
+  Glyph* m_selectedGlyph = nullptr;
   Button* m_modeBadge = nullptr;
   Glyph* m_folderGlyph = nullptr;
   Glyph* m_loadingGlyph = nullptr;

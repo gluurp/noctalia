@@ -548,6 +548,28 @@ void SettingsWindow::openToBarWidget(std::string barName, std::string widgetName
   }
 }
 
+void SettingsWindow::openWallpaperColors() {
+  if (m_config == nullptr) {
+    return;
+  }
+  const std::string path = m_config->getPaletteWallpaperPath();
+  clearTransientSettingsState();
+  clearStatusMessage();
+  m_searchQuery.clear();
+  m_pluginSearchQuery.clear();
+  m_selectedSection = "wallpaper";
+  m_contentScrollState.offset = 0.0F;
+  m_sidebarScrollState.offset = 0.0F;
+  const bool wasOpen = isOpen();
+  open();
+  if (wasOpen && isOpen()) {
+    requestSceneRebuild();
+  }
+  if (!path.empty() && !path.starts_with("color:")) {
+    DeferredCall::callLater([this, path] { openWallpaperColorEditor(path); });
+  }
+}
+
 bool SettingsWindow::openToPlugin(std::string pluginId) {
   const auto* manifest = scripting::PluginRegistry::instance().findManifest(pluginId);
   if (manifest == nullptr || !settings::pluginHasSettings(*manifest)) {

@@ -310,6 +310,8 @@ namespace settings {
     SettingControl control;
     bool advanced = false;
     std::string searchText;
+    // Optional identity for a ButtonSetting whose action is wired by the window, not the registry.
+    std::string actionId;
     SettingVisibility visibleWhen; // empty = always visible
   };
 
@@ -337,6 +339,7 @@ namespace settings {
     std::vector<SelectOption> fontFamilies;
     std::string shellAvatarPath;
     std::vector<std::string> keyboardLayoutNames;
+    std::string activeWallpaperPath;
   };
 
   const BarConfig* findBar(const Config& cfg, std::string_view name);

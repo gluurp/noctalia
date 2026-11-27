@@ -87,6 +87,7 @@ public:
 
   void open(std::string context = "");
   void openToBarWidget(std::string barName, std::string widgetName);
+  void openWallpaperColors();
   // Opens the window on the plugins section with the plugin's settings editor.
   // Returns false when the plugin is unknown, disabled, or exposes no settings.
   [[nodiscard]] bool openToPlugin(std::string pluginId);
@@ -211,6 +212,8 @@ private:
   // Request is taken by value because opening the popup can close the sheet that owns the forwarding control.
   void openSearchPickerPopup(settings::SearchPickerOpenRequest request);
   void openMonitorOverrideCreateDialog(std::optional<std::string> barName);
+  void openLinkedWallpaperEditor(std::optional<std::string> groupId);
+  void openWallpaperColorEditor(std::string path);
   void openSessionActionEntryEditor(std::size_t index);
   void syncSessionActionInlineSummary(std::size_t index, const SessionPanelActionConfig& row);
   void openIdleBehaviorEntryEditor(std::size_t index);

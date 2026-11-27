@@ -107,6 +107,10 @@ namespace noctalia::theme {
     HttpClient& m_httpClient;
     std::string m_inflightCommunityName;
 
+    // Effective theme used by the last resolution, so a wallpaper change that only
+    // selects a different non-wallpaper palette still re-resolves.
+    std::optional<ThemeConfig> m_lastEffectiveTheme;
+
     // Memoized wallpaper palette (see resolveWallpaperGenerated); any key mismatch re-decodes.
     std::optional<GeneratedPalette> m_wallpaperCacheGenerated;
     WallpaperPaletteKey m_wallpaperCacheKey;

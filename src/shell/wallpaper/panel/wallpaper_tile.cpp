@@ -169,6 +169,20 @@ WallpaperTile::WallpaperTile(float cellWidth, float cellHeight, float contentSca
 
   applyStarVisualState();
 
+  // Selection needs a high-contrast marker that does not depend on the
+  // thumbnail being bright; a border alone disappears into dark wallpapers.
+  m_thumbHost->addChild(
+      ui::glyph({
+          .out = &m_selectedGlyph,
+          .glyph = "check",
+          .glyphSize = Style::fontSizeBody * m_contentScale,
+          .color = fixedColorSpec(rgba(1.0F, 1.0F, 1.0F, 0.96F)),
+          .visible = false,
+          .participatesInLayout = false,
+      })
+  );
+  applyStarGlyphStyle(m_selectedGlyph, fixedColorSpec(rgba(1.0F, 1.0F, 1.0F, 0.96F)), m_contentScale);
+
   m_thumbHost->addChild(
       ui::button({
           .out = &m_modeBadge,
@@ -233,6 +247,15 @@ void WallpaperTile::layoutThumbOverlays() {
     const float glyphH = m_starGlyph->height() > 0.0F ? m_starGlyph->height() : hitSize;
     m_starGlyph->setPosition(
         std::round(w - hitSize + (hitSize - glyphW) * 0.5F), std::round((hitSize - glyphH) * 0.5F)
+    );
+  }
+
+  if (m_selectedGlyph != nullptr) {
+    const float hitSize = starButtonSize(m_contentScale);
+    const float glyphW = m_selectedGlyph->width() > 0.0F ? m_selectedGlyph->width() : hitSize;
+    const float glyphH = m_selectedGlyph->height() > 0.0F ? m_selectedGlyph->height() : hitSize;
+    m_selectedGlyph->setPosition(
+        std::round((hitSize - glyphW) * 0.5F), std::round((hitSize - glyphH) * 0.5F)
     );
   }
 
@@ -622,6 +645,9 @@ void WallpaperTile::applyVisualState() {
     return;
   }
   const bool active = m_selected || m_hoveredVisual || m_current;
+  if (m_selectedGlyph != nullptr) {
+    m_selectedGlyph->setVisible(m_selected || m_current);
+  }
   setOpacity(m_missingFile ? 0.45F : 1.0F);
   setZIndex((m_selected || m_current) ? 2 : (m_hoveredVisual ? 1 : 0));
   animateThumbScale(activeThumbScale(m_selected, m_current, m_hoveredVisual));

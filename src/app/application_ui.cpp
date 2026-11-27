@@ -588,6 +588,7 @@ void Application::initPanelManagerAndPanels() {
     wl_output* output = m_compositorPlatform.preferredInteractiveOutput(std::chrono::milliseconds(1200));
     m_panelManager.openPanel("wallpaper", PanelOpenRequest{.output = output});
   });
+
   m_settingsWindow.setCalendarService(&m_calendarService);
   m_calendarService.setCredentialChangeCallback([this] {
     m_settingsWindow.onExternalOptionsChanged();
@@ -772,12 +773,11 @@ void Application::initPanelManagerAndPanels() {
     m_overviewLauncherCapture.setEnabled(overviewTypeToLaunchEnabled(m_configService));
   });
   m_overviewLauncherCapture.sync();
-  m_panelManager.registerPanel(
-      "wallpaper",
-      std::make_unique<WallpaperPanel>(
-          &m_wayland, &m_configService, &m_thumbnailService, &m_wallpaperScanner, &m_themeService
-      )
+  auto wallpaperPanel = std::make_unique<WallpaperPanel>(
+      &m_wayland, &m_configService, &m_thumbnailService, &m_wallpaperScanner, &m_themeService
   );
+  wallpaperPanel->setOpenWallpaperColors([this] { m_settingsWindow.openWallpaperColors(); });
+  m_panelManager.registerPanel("wallpaper", std::move(wallpaperPanel));
   m_panelManager.registerPanel("tray-drawer", std::make_unique<TrayDrawerPanel>(m_trayService.get(), &m_configService));
   m_panelManager.registerPanel("polkit", std::make_unique<PolkitPanel>(&m_configService, [this] {
                                  return m_polkitAgent.get();

@@ -818,6 +818,9 @@ settings::RegistryEnvironment SettingsWindow::buildRegistryEnvironment() const {
   }
   env.keyboardLayoutNames = m_wayland != nullptr ? m_wayland->keyboardLayoutNames() : std::vector<std::string>{};
   env.availableOutputs = availableOutputs();
+  if (m_config != nullptr) {
+    env.activeWallpaperPath = m_config->getPaletteWallpaperPath();
+  }
   return env;
 }
 
@@ -1584,6 +1587,39 @@ void SettingsWindow::refreshSettingsRegistry(const Config& cfg) {
       if (auto* button = std::get_if<settings::ButtonSetting>(&entry.control)) {
         button->action = [this] { DeferredCall::callLater([this] { openPaletteInspector(); }); };
       }
+    }
+    if (entry.section == settings::SettingsSection::Wallpaper && entry.group == "wallpaper-colors") {
+      if (auto* button = std::get_if<settings::ButtonSetting>(&entry.control)) {
+        const std::string actionId = entry.actionId;
+        if (actionId.starts_with("wallpaper-color-edit:")) {
+          button->action = [this, path = actionId.substr(std::string("wallpaper-color-edit:").size())] {
+            DeferredCall::callLater([this, path] { openWallpaperColorEditor(path); });
+          };
+        } else if (actionId == "wallpaper-color-edit") {
+          button->action = [this] {
+            const std::string path = m_config != nullptr ? m_config->getPaletteWallpaperPath() : std::string{};
+            if (!path.empty()) {
+              DeferredCall::callLater([this, path] { openWallpaperColorEditor(path); });
+            }
+          };
+        }
+      }
+      continue;
+    }
+    if (entry.section == settings::SettingsSection::Wallpaper && entry.group == "linked-monitors") {
+      if (auto* button = std::get_if<settings::ButtonSetting>(&entry.control)) {
+        const std::string actionId = entry.actionId;
+        if (actionId == "wallpaper-link-add") {
+          button->action = [this] {
+            DeferredCall::callLater([this] { openLinkedWallpaperEditor(std::nullopt); });
+          };
+        } else if (actionId.starts_with("wallpaper-link-edit:")) {
+          button->action = [this, id = actionId.substr(std::string("wallpaper-link-edit:").size())] {
+            DeferredCall::callLater([this, id] { openLinkedWallpaperEditor(id); });
+          };
+        }
+      }
+      continue;
     }
     if (entry.section != settings::SettingsSection::Templates || entry.group != "community") {
       continue;

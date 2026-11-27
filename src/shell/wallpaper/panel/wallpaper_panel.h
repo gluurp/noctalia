@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -20,8 +21,7 @@
 
 class Button;
 class ConfigService;
-class Flex;
-class Input;
+class Flex;class Input;
 class Label;
 class Segmented;
 class Select;
@@ -30,6 +30,7 @@ class Toggle;
 class VirtualGridView;
 class WallpaperGridAdapter;
 class WaylandConnection;
+struct WallpaperCleanReport;
 
 namespace noctalia::theme {
   class ThemeService;
@@ -45,11 +46,19 @@ public:
     Random,
   };
 
+  enum class ColorScope : std::uint8_t {
+    Global,
+    Set,
+    Wallpaper,
+  };
+
   WallpaperPanel(
       WaylandConnection* wayland, ConfigService* config, ThumbnailService* thumbnails, WallpaperScanner* scanner,
       noctalia::theme::ThemeService* themeService = nullptr
   );
   ~WallpaperPanel() override;
+
+  void setOpenWallpaperColors(std::function<void()> callback) { m_openWallpaperColors = std::move(callback); }
 
   void create() override;
   void onOpen(std::string_view context) override;
@@ -84,12 +93,13 @@ private:
   void navigateUp();
   void applyWallpaperFromEntry(const WallpaperEntry& entry);
   void applyWallpaperPath(const std::string& path, const WallpaperFavorite* applyTheme);
-  const WallpaperFavorite* favoriteThemeToApply(std::string_view path) const;
   WallpaperFavorite themeFromControls() const;
   WallpaperFavorite activeThemeSettings() const;
   void applyThemeFromControls();
   void toggleFavoriteForPath(const std::string& path);
   void syncThemeControls();
+  void syncColorScope();
+  bool resetColorOverride();
   void syncFillModeControl();
   void rebuildPalettePicker(const WallpaperFavorite* theme);
   void openPalettePicker();
@@ -100,6 +110,25 @@ private:
       std::vector<WallpaperEntry>& out, std::unordered_set<std::string>& favoritePaths,
       const std::filesystem::path& activeDir, const std::filesystem::path& rootDir
   ) const;
+  // One synthetic root folder per linked group, pointing at its color-source
+  // member directory. Only called when browsing the root.
+  void appendLinkGroupEntries(
+      std::vector<WallpaperEntry>& out, bool filterActive, const std::string& filterNeedle
+  ) const;
+  // True when at least one link group hides its original member folders.
+  bool rootHidesLinkOriginals() const;
+  bool anyLinkGroupHidesOriginals() const;
+  // True when `path` (a file or directory) lives inside a hidden member folder.
+  bool pathInsideHiddenLinkMemberDirectory(const std::filesystem::path& path) const;
+  bool pathContainsHiddenLinkMemberDirectory(const std::filesystem::path& path) const;
+  void setHideOriginalsForAllGroups(bool hide);
+  void setShowFavoritesAtRoot(bool show);
+  void syncBrowseToggles();
+  void requestWallpaperClean();
+  void applyWallpaperClean();
+  void hideWallpaperCleanPanel();
+  void showWallpaperCleanStatus(std::string_view title, std::string_view body);
+  std::string wallpaperCleanReportText(const WallpaperCleanReport& report) const;
   void sortVisibleEntries();
   void reseedRandomSort();
   void syncSortButtonGlyph();
@@ -137,13 +166,26 @@ private:
   Button* m_backButton = nullptr;
   Segmented* m_themeModeSegmented = nullptr;
   Segmented* m_paletteSourceSegmented = nullptr;
+  Segmented* m_colorScopeSegmented = nullptr;
+  ColorScope m_colorScope = ColorScope::Global;
   Button* m_paletteButton = nullptr;
   Select* m_monitorSelect = nullptr;
   Input* m_filterInput = nullptr;
   Button* m_favoriteCurrentButton = nullptr;
+  Button* m_colorsButton = nullptr;
   Select* m_fillModeSelect = nullptr;
   Toggle* m_flattenToggle = nullptr;
   Label* m_flattenLabel = nullptr;
+  Toggle* m_hideOriginalsToggle = nullptr;
+  Label* m_hideOriginalsLabel = nullptr;
+  Toggle* m_favoritesAtRootToggle = nullptr;
+  Label* m_favoritesAtRootLabel = nullptr;
+  Button* m_cleanButton = nullptr;
+  Flex* m_cleanConfirmPanel = nullptr;
+  Label* m_cleanConfirmTitle = nullptr;
+  Label* m_cleanConfirmBody = nullptr;
+  Button* m_cleanConfirmApply = nullptr;
+  Button* m_cleanConfirmCancel = nullptr;
   Button* m_sortButton = nullptr;
   Button* m_refreshButton = nullptr;
   Button* m_colorButton = nullptr;
@@ -188,4 +230,5 @@ private:
   bool m_dirty = false;
   bool m_thumbnailRefreshPending = false;
   ThumbnailService::Subscription m_thumbnailPendingSub;
+  std::function<void()> m_openWallpaperColors;
 };

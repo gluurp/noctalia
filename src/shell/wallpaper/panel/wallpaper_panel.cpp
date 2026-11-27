@@ -7,6 +7,7 @@
 #include "core/ui_phase.h"
 #include "cursor-shape-v1-client-protocol.h"
 #include "i18n/i18n.h"
+#include "notification/notifications.h"
 #include "render/codecs/thumbnail_service.h"
 #include "render/core/renderer.h"
 #include "render/scene/input_area.h"
@@ -32,6 +33,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <random>
 #include <string_view>
@@ -174,6 +176,15 @@ namespace {
     return canonicalWallpaperDirectory(a) == canonicalWallpaperDirectory(b);
   }
 
+  std::string canonicalWallpaperPathKey(const std::filesystem::path& path) {
+    std::error_code ec;
+    const auto canonical = std::filesystem::weakly_canonical(path, ec);
+    if (!ec) {
+      return FileUtils::normalizeWallpaperPath(canonical.string());
+    }
+    return FileUtils::normalizeWallpaperPath(path.string());
+  }
+
   bool wallpaperPathInsideDirectory(const std::filesystem::path& file, const std::filesystem::path& directory) {
     const std::filesystem::path dir = canonicalWallpaperDirectory(directory);
     if (dir.empty()) {
@@ -256,6 +267,7 @@ public:
   void setRenderer(Renderer* renderer) { m_renderer = renderer; }
   void setConfig(ConfigService* config) { m_config = config; }
   void setCurrentWallpaperPath(std::string path) { m_currentWallpaperPath = std::move(path); }
+  void setStickySelectedIndex(std::optional<std::size_t> index) { m_stickySelectedIndex = index; }
   void setThumbnailService(ThumbnailService* service) {
     m_thumbnails = service;
     for (WallpaperTile* tile : m_pool) {
@@ -317,12 +329,13 @@ public:
         wt->setFavoriteState(false, std::nullopt);
       }
     }
-    wt->setSelected(selected);
-    wt->setCurrent(
+    const bool current =
         m_entries != nullptr
         && index < m_entries->size()
-        && wallpaperEntryIsCurrent((*m_entries)[index], m_currentWallpaperPath)
-    );
+        && wallpaperEntryIsCurrent((*m_entries)[index], m_currentWallpaperPath);
+    const bool effectiveSelected = selected || (m_stickySelectedIndex.has_value() && *m_stickySelectedIndex == index);
+    wt->setSelected(effectiveSelected);
+    wt->setCurrent(current);
     wt->setHoveredVisual(hovered && !selected);
   }
 
@@ -391,6 +404,7 @@ private:
   float m_scale;
   const std::vector<WallpaperEntry>* m_entries = nullptr;
   std::string m_currentWallpaperPath;
+  std::optional<std::size_t> m_stickySelectedIndex;
   Renderer* m_renderer = nullptr;
   ThumbnailService* m_thumbnails = nullptr;
   ConfigService* m_config = nullptr;
@@ -440,7 +454,7 @@ void WallpaperPanel::create() {
   auto toolbar = ui::row({
       .out = &m_toolbar,
       .align = FlexAlign::Center,
-      .gap = Style::spaceSm * scale,
+      .gap = Style::spaceXs * scale,
       .fillWidth = true,
   });
 
@@ -462,7 +476,7 @@ void WallpaperPanel::create() {
           .controlHeight = Style::controlHeightSm * scale,
           .horizontalPadding = Style::spaceMd * scale,
           .surfaceOpacity = panelCardOpacity(),
-          .width = 210.0F * scale,
+          .width = 120.0F * scale,
           .height = 0.0F,
           .onChange =
               [this](const std::string& text) {
@@ -490,13 +504,15 @@ void WallpaperPanel::create() {
   toolbar->addChild(
       ui::button({
           .out = &m_backButton,
+          .text = i18n::tr("wallpaper.panel.back"),
           .glyph = "arrow-big-up",
+          .fontSize = Style::fontSizeBody * scale,
           .glyphSize = Style::fontSizeBody * scale,
           .variant = ButtonVariant::Secondary,
           .tooltip = i18n::tr("wallpaper.panel.navigate-up"),
-          .minWidth = Style::controlHeightSm * scale,
           .minHeight = Style::controlHeightSm * scale,
-          .padding = Style::spaceXs * scale,
+          .paddingV = Style::spaceXs * scale,
+          .paddingH = Style::spaceSm * scale,
           .styleRadius = Style::radiusMd,
           .styleRadiusScale = scale,
           .onClick = [this] { navigateUp(); },
@@ -530,6 +546,38 @@ void WallpaperPanel::create() {
             m_dirty = true;
             PanelManager::instance().refresh();
           },
+      })
+  );
+
+  toolbar->addChild(
+      ui::label({
+          .out = &m_hideOriginalsLabel,
+          .text = i18n::tr("wallpaper.panel.show-originals"),
+          .fontSize = Style::fontSizeBody * scale,
+          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+      })
+  );
+
+  toolbar->addChild(
+      ui::toggle({
+          .out = &m_hideOriginalsToggle,
+          .onChange = [this](bool checked) { setHideOriginalsForAllGroups(!checked); },
+      })
+  );
+
+  toolbar->addChild(
+      ui::label({
+          .out = &m_favoritesAtRootLabel,
+          .text = i18n::tr("wallpaper.panel.favorites-at-root"),
+          .fontSize = Style::fontSizeBody * scale,
+          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+      })
+  );
+
+  toolbar->addChild(
+      ui::toggle({
+          .out = &m_favoritesAtRootToggle,
+          .onChange = [this](bool checked) { setShowFavoritesAtRoot(checked); },
       })
   );
 
@@ -584,6 +632,22 @@ void WallpaperPanel::create() {
           .styleRadius = Style::radiusMd,
           .styleRadiusScale = scale,
           .onClick = [this] { cycleSortMode(); },
+      })
+  );
+
+  toolbar->addChild(
+      ui::button({
+          .out = &m_cleanButton,
+          .glyph = "trash",
+          .glyphSize = Style::fontSizeBody * scale,
+          .variant = ButtonVariant::Default,
+          .tooltip = i18n::tr("wallpaper.panel.clean"),
+          .minWidth = Style::controlHeightSm * scale,
+          .minHeight = Style::controlHeightSm * scale,
+          .padding = Style::spaceXs * scale,
+          .styleRadius = Style::radiusMd,
+          .styleRadiusScale = scale,
+          .onClick = [this] { requestWallpaperClean(); },
       })
   );
 
@@ -739,6 +803,48 @@ void WallpaperPanel::create() {
     fillModeOptions.emplace_back(i18n::tr(option.labelKey));
   }
 
+  std::vector<ui::SegmentedOption> colorScopeOptions{
+      {.label = i18n::tr("wallpaper.panel.color-scope.global")},
+  };
+  const bool hasManagedLinks =
+      m_config != nullptr && !m_config->config().wallpaper.links.empty();
+  if (hasManagedLinks) {
+    colorScopeOptions.push_back({.label = i18n::tr("wallpaper.panel.color-scope.set")});
+  }
+  colorScopeOptions.push_back({.label = i18n::tr("wallpaper.panel.color-scope.wallpaper")});
+
+  displayGroup->addChild(
+      ui::segmented({
+          .out = &m_colorScopeSegmented,
+          .options = std::move(colorScopeOptions),
+          .selectedIndex = static_cast<std::size_t>(0),
+          .scale = scale,
+          .compact = true,
+          .surfaceOpacity = panelCardOpacity(),
+          .onChange = [this, hasManagedLinks](std::size_t index) {
+            if (m_syncingThemeControls || m_config == nullptr) {
+              return;
+            }
+            if (index == 0) {
+              // Clicking Global is an action: drop every override that affects
+              // the selected image, not just a scope selection.
+              resetColorOverride();
+              syncThemeControls();
+              m_dirty = true;
+              PanelManager::instance().refresh();
+              return;
+            }
+            if (hasManagedLinks && index == 1) {
+              m_colorScope = ColorScope::Set;
+            } else {
+              m_colorScope = ColorScope::Wallpaper;
+            }
+            m_dirty = true;
+            PanelManager::instance().refresh();
+          },
+      })
+  );
+
   displayGroup->addChild(
       ui::select(
           {.out = &m_fillModeSelect,
@@ -786,6 +892,96 @@ void WallpaperPanel::create() {
 
   themeRow->addChild(std::move(displayGroup));
   root->addChild(std::move(themeRow));
+
+  auto colorsRow = ui::row({.align = FlexAlign::Center, .justify = FlexJustify::End, .fillWidth = true});
+  colorsRow->addChild(ui::button({
+      .out = &m_colorsButton,
+      .text = i18n::tr("wallpaper.panel.colors-for-this"),
+      .glyph = "color-picker",
+      .fontSize = Style::fontSizeBody * scale,
+      .glyphSize = Style::fontSizeBody * scale,
+      .variant = ButtonVariant::Default,
+      .surfaceOpacity = panelCardOpacity(),
+      .minHeight = Style::controlHeightSm * scale,
+      .paddingV = Style::spaceXs * scale,
+      .paddingH = Style::spaceSm * scale,
+      .styleRadius = Style::radiusMd,
+      .styleRadiusScale = scale,
+      .visible = false,
+      .onClick = [this] {
+        if (m_openWallpaperColors) {
+          m_openWallpaperColors();
+        }
+      },
+  }));
+  root->addChild(std::move(colorsRow));
+
+  // Inline clean confirmation, mirroring the clipboard panel's confirm style.
+  auto cleanPanel = ui::column({
+      .out = &m_cleanConfirmPanel,
+      .align = FlexAlign::Stretch,
+      .gap = Style::spaceXs * scale,
+      .padding = Style::spaceSm * scale,
+      .fill = colorSpecFromRole(ColorRole::ErrorContainer),
+      .styleRadius = Style::radiusSm,
+      .styleRadiusScale = scale,
+      .border = colorSpecFromRole(ColorRole::Error),
+      .fillWidth = true,
+      .visible = false,
+      .participatesInLayout = false,
+  });
+  cleanPanel->addChild(
+      ui::label({
+          .out = &m_cleanConfirmTitle,
+          .text = i18n::tr("wallpaper.panel.clean-title"),
+          .fontSize = Style::fontSizeBody * scale,
+          .fontWeight = FontWeight::Bold,
+          .color = colorSpecFromRole(ColorRole::OnErrorContainer),
+      })
+  );
+  cleanPanel->addChild(
+      ui::label({
+          .out = &m_cleanConfirmBody,
+          .fontSize = Style::fontSizeCaption * scale,
+          .color = colorSpecFromRole(ColorRole::OnErrorContainer),
+      })
+  );
+  cleanPanel->addChild(
+      ui::row(
+          {.align = FlexAlign::Center, .gap = Style::spaceSm * scale}, ui::spacer(),
+          ui::button({
+              .out = &m_cleanConfirmCancel,
+              .text = i18n::tr("common.actions.cancel"),
+              .fontSize = Style::fontSizeCaption * scale,
+              .variant = ButtonVariant::Ghost,
+              .minHeight = Style::controlHeightSm * scale,
+              .paddingV = Style::spaceXs * scale,
+              .paddingH = Style::spaceSm * scale,
+              .styleRadius = Style::radiusSm,
+              .styleRadiusScale = scale,
+              .onClick = [this] {
+                hideWallpaperCleanPanel();
+                m_dirty = true;
+                PanelManager::instance().refresh();
+              },
+          }),
+          ui::button({
+              .out = &m_cleanConfirmApply,
+              .text = i18n::tr("wallpaper.panel.clean-confirm"),
+              .glyph = "trash",
+              .fontSize = Style::fontSizeCaption * scale,
+              .glyphSize = Style::fontSizeCaption * scale,
+              .variant = ButtonVariant::Destructive,
+              .minHeight = Style::controlHeightSm * scale,
+              .paddingV = Style::spaceXs * scale,
+              .paddingH = Style::spaceSm * scale,
+              .styleRadius = Style::radiusSm,
+              .styleRadiusScale = scale,
+              .onClick = [this] { applyWallpaperClean(); },
+          })
+      )
+  );
+  root->addChild(std::move(cleanPanel));
 
   // ── Body: virtualized scrolling grid ──────────────────────────────────
   m_adapter = std::make_unique<WallpaperGridAdapter>(scale);
@@ -963,6 +1159,7 @@ void WallpaperPanel::onPanelCardOpacityChanged(float opacity) {
 }
 
 void WallpaperPanel::onOpen(std::string_view /*context*/) {
+  hideWallpaperCleanPanel();
   m_filterQuery.clear();
   m_pendingFilterQuery.clear();
   m_filterDebounceTimer.stop();
@@ -972,6 +1169,7 @@ void WallpaperPanel::onOpen(std::string_view /*context*/) {
   if (m_flattenToggle != nullptr) {
     m_flattenToggle->setCheckedImmediate(m_flatten);
   }
+  syncBrowseToggles();
   const bool showNames = m_config == nullptr || m_config->config().shell.panel.wallpaperShowNames;
   if (showNames != m_showNames) {
     m_showNames = showNames;
@@ -1031,6 +1229,16 @@ void WallpaperPanel::onClose() {
   m_filterInput = nullptr;
   m_flattenToggle = nullptr;
   m_flattenLabel = nullptr;
+  m_hideOriginalsToggle = nullptr;
+  m_hideOriginalsLabel = nullptr;
+  m_favoritesAtRootToggle = nullptr;
+  m_favoritesAtRootLabel = nullptr;
+  m_cleanButton = nullptr;
+  m_cleanConfirmPanel = nullptr;
+  m_cleanConfirmTitle = nullptr;
+  m_cleanConfirmBody = nullptr;
+  m_cleanConfirmApply = nullptr;
+  m_cleanConfirmCancel = nullptr;
   m_sortButton = nullptr;
   m_refreshButton = nullptr;
   m_colorButton = nullptr;
@@ -1214,6 +1422,10 @@ void WallpaperPanel::syncBrowseChrome() {
   if (m_backButton != nullptr) {
     m_backButton->setVisible(!m_navStack.empty());
   }
+  if (m_colorsButton != nullptr && m_config != nullptr) {
+    const std::string active = m_config->getPaletteWallpaperPath();
+    m_colorsButton->setVisible(!active.empty() && !active.starts_with("color:"));
+  }
   if (m_favoriteCurrentButton != nullptr && m_config != nullptr) {
     const std::string current = currentWallpaperPathForSelection();
     const bool favorite = !current.empty() && m_config->isWallpaperFavorite(current);
@@ -1250,13 +1462,18 @@ void WallpaperPanel::appendFilteredFavoriteEntries(
     if (!favoriteVisibleInBrowseContext(favorite.path, activeDir, rootDir, m_flatten)) {
       continue;
     }
+    // Hidden original folders are hidden at the root, including their favorites.
+    if (wallpaperDirectoriesEquivalent(activeDir, rootDir) && rootHidesLinkOriginals()
+        && pathInsideHiddenLinkMemberDirectory(std::filesystem::path(favorite.path))) {
+      continue;
+    }
 
     const std::string displayName = displayNameForWallpaperPath(favorite.path);
     if (!filterNeedle.empty() && !StringUtils::toLower(displayName).contains(filterNeedle)) {
       continue;
     }
 
-    const std::string normalized = FileUtils::normalizeWallpaperPath(favorite.path);
+    const std::string normalized = canonicalWallpaperPathKey(favorite.path);
     if (!favoritePaths.insert(normalized).second) {
       continue;
     }
@@ -1267,6 +1484,272 @@ void WallpaperPanel::appendFilteredFavoriteEntries(
     entry.isDir = false;
     out.push_back(std::move(entry));
   }
+}
+
+void WallpaperPanel::appendLinkGroupEntries(
+    std::vector<WallpaperEntry>& out, bool filterActive, const std::string& filterNeedle
+) const {
+  if (m_config == nullptr) {
+    return;
+  }
+  for (const auto& group : m_config->config().wallpaper.links) {
+    if (group.members.empty()) {
+      continue;
+    }
+    const WallpaperLinkMember* source = nullptr;
+    for (const auto& member : group.members) {
+      if (!group.colorSource.empty() && member.monitor == group.colorSource) {
+        source = &member;
+        break;
+      }
+    }
+    const WallpaperLinkMember& member = source != nullptr ? *source : group.members.front();
+    const std::filesystem::path directory = FileUtils::resolvePath(member.directory);
+    if (directory.empty()) {
+      continue;
+    }
+    const std::string groupName = group.name.empty() ? group.id : group.name;
+    const std::string colorSource = source != nullptr ? source->monitor : member.monitor;
+    std::string label = i18n::trp(
+        "wallpaper.panel.link-group-label", static_cast<long>(group.members.size()), "name", groupName, "monitor",
+        colorSource
+    );
+    if (filterActive && !StringUtils::toLower(label).contains(filterNeedle)) {
+      continue;
+    }
+
+    WallpaperEntry entry;
+    entry.absPath = directory;
+    entry.name = std::move(label);
+    entry.isDir = true;
+    out.push_back(std::move(entry));
+  }
+}
+
+bool WallpaperPanel::rootHidesLinkOriginals() const {
+  if (m_config == nullptr) {
+    return false;
+  }
+  const auto& links = m_config->config().wallpaper.links;
+  return std::ranges::any_of(links, [](const WallpaperLinkGroup& group) {
+    return group.hideOriginals && !group.members.empty();
+  });
+}
+
+bool WallpaperPanel::anyLinkGroupHidesOriginals() const {
+  if (m_config == nullptr) {
+    return false;
+  }
+  const auto& links = m_config->config().wallpaper.links;
+  return std::ranges::any_of(links, [](const WallpaperLinkGroup& group) { return group.hideOriginals; });
+}
+
+bool WallpaperPanel::pathInsideHiddenLinkMemberDirectory(const std::filesystem::path& path) const {
+  if (m_config == nullptr || path.empty()) {
+    return false;
+  }
+  for (const auto& group : m_config->config().wallpaper.links) {
+    if (!group.hideOriginals) {
+      continue;
+    }
+    for (const auto& member : group.members) {
+      const std::filesystem::path directory = FileUtils::resolvePath(member.directory);
+      if (directory.empty()) {
+        continue;
+      }
+      if (wallpaperDirectoriesEquivalent(path, directory) || wallpaperPathInsideDirectory(path, directory)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool WallpaperPanel::pathContainsHiddenLinkMemberDirectory(const std::filesystem::path& path) const {
+  if (m_config == nullptr || path.empty()) {
+    return false;
+  }
+  for (const auto& group : m_config->config().wallpaper.links) {
+    if (!group.hideOriginals) {
+      continue;
+    }
+    for (const auto& member : group.members) {
+      const std::filesystem::path directory = FileUtils::resolvePath(member.directory);
+      if (directory.empty() || wallpaperDirectoriesEquivalent(path, directory)) {
+        continue;
+      }
+      if (wallpaperPathInsideDirectory(directory, path)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void WallpaperPanel::setHideOriginalsForAllGroups(bool hide) {
+  if (m_config == nullptr) {
+    return;
+  }
+  std::vector<WallpaperLinkGroup> groups = m_config->config().wallpaper.links;
+  if (groups.empty()) {
+    return;
+  }
+  for (auto& group : groups) {
+    group.hideOriginals = hide;
+  }
+  if (!m_config->setWallpaperLinkGroups(groups)) {
+    kLog.warn("failed to persist linked wallpaper group visibility");
+  }
+  refreshVisibleEntries();
+  resetSelection();
+  rebindGrid();
+  syncBrowseChrome();
+  syncBrowseToggles();
+  m_dirty = true;
+  PanelManager::instance().refresh();
+}
+
+void WallpaperPanel::setShowFavoritesAtRoot(bool show) {
+  if (m_config == nullptr) {
+    return;
+  }
+  if (!m_config->setOverride({"wallpaper", "show_favorites_at_root"}, show)) {
+    kLog.warn("failed to persist show_favorites_at_root");
+  }
+  refreshVisibleEntries();
+  resetSelection();
+  rebindGrid();
+  syncBrowseChrome();
+  syncBrowseToggles();
+  m_dirty = true;
+  PanelManager::instance().refresh();
+}
+
+void WallpaperPanel::syncBrowseToggles() {
+  if (m_hideOriginalsToggle != nullptr) {
+    const bool hasGroups = m_config != nullptr && !m_config->config().wallpaper.links.empty();
+    m_hideOriginalsToggle->setVisible(hasGroups);
+    if (m_hideOriginalsLabel != nullptr) {
+      m_hideOriginalsLabel->setVisible(hasGroups);
+    }
+    m_hideOriginalsToggle->setCheckedImmediate(!anyLinkGroupHidesOriginals());
+  }
+  if (m_favoritesAtRootToggle != nullptr && m_config != nullptr) {
+    m_favoritesAtRootToggle->setCheckedImmediate(m_config->config().wallpaper.showFavoritesAtRoot);
+  }
+}
+
+std::string WallpaperPanel::wallpaperCleanReportText(const WallpaperCleanReport& report) const {
+  std::string text;
+  const auto appendCount = [&text](std::size_t count, const char* key) {
+    if (count == 0) {
+      return;
+    }
+    if (!text.empty()) {
+      text += '\n';
+    }
+    text += i18n::trp(key, static_cast<long>(count));
+  };
+  appendCount(report.favoriteCount, "wallpaper.panel.clean-count-favorite");
+  appendCount(report.monitorCount, "wallpaper.panel.clean-count-monitor");
+  appendCount(report.pathCount, "wallpaper.panel.clean-count-path");
+  appendCount(report.colorOverrideCount, "wallpaper.panel.clean-count-color-override");
+
+  if (!report.kept.empty()) {
+    if (!text.empty()) {
+      text += "\n\n";
+    }
+    text += i18n::tr("wallpaper.panel.clean-kept-reason");
+    text += "\n";
+    text += i18n::trp("wallpaper.panel.clean-kept-header", static_cast<long>(report.kept.size()));
+    for (const auto& path : report.kept) {
+      text += "\n";
+      text += path;
+    }
+  }
+  return text;
+}
+
+void WallpaperPanel::showWallpaperCleanStatus(std::string_view title, std::string_view body) {
+  if (m_cleanConfirmPanel == nullptr) {
+    return;
+  }
+  if (m_cleanConfirmTitle != nullptr) {
+    m_cleanConfirmTitle->setText(title);
+  }
+  if (m_cleanConfirmBody != nullptr) {
+    m_cleanConfirmBody->setText(body);
+  }
+  if (m_cleanConfirmApply != nullptr) {
+    m_cleanConfirmApply->setVisible(false);
+  }
+  if (m_cleanConfirmCancel != nullptr) {
+    m_cleanConfirmCancel->setText(i18n::tr("wallpaper.panel.clean-close"));
+  }
+  m_cleanConfirmPanel->setVisible(true);
+  m_cleanConfirmPanel->setParticipatesInLayout(true);
+  m_dirty = true;
+  PanelManager::instance().refresh();
+}
+
+void WallpaperPanel::requestWallpaperClean() {
+  if (m_config == nullptr || m_cleanConfirmPanel == nullptr) {
+    return;
+  }
+  const WallpaperCleanReport report = m_config->cleanWallpaperReferences(true);
+  if (report.empty()) {
+    std::string body = i18n::tr("wallpaper.panel.clean-empty");
+    if (!report.kept.empty()) {
+      body += "\n";
+      body += i18n::trp("wallpaper.panel.clean-kept-header", static_cast<long>(report.kept.size()));
+      for (const auto& path : report.kept) {
+        body += "\n";
+        body += path;
+      }
+    }
+    showWallpaperCleanStatus(i18n::tr("wallpaper.panel.clean-nothing"), body);
+    return;
+  }
+
+  if (m_cleanConfirmTitle != nullptr) {
+    m_cleanConfirmTitle->setText(i18n::tr("wallpaper.panel.clean-title"));
+  }
+  if (m_cleanConfirmBody != nullptr) {
+    m_cleanConfirmBody->setText(wallpaperCleanReportText(report));
+  }
+  if (m_cleanConfirmApply != nullptr) {
+    m_cleanConfirmApply->setVisible(true);
+  }
+  if (m_cleanConfirmCancel != nullptr) {
+    m_cleanConfirmCancel->setText(i18n::tr("common.actions.cancel"));
+  }
+  m_cleanConfirmPanel->setVisible(true);
+  m_cleanConfirmPanel->setParticipatesInLayout(true);
+  m_dirty = true;
+  PanelManager::instance().refresh();
+}
+
+void WallpaperPanel::applyWallpaperClean() {
+  if (m_config == nullptr) {
+    return;
+  }
+  const WallpaperCleanReport report = m_config->cleanWallpaperReferences(false);
+  kLog.info("wallpaper clean removed {} references, kept {}", report.removed.size(), report.kept.size());
+  hideWallpaperCleanPanel();
+  refreshVisibleEntries();
+  resetSelection();
+  rebindGrid();
+  syncBrowseChrome();
+  m_dirty = true;
+  PanelManager::instance().refresh();
+}
+
+void WallpaperPanel::hideWallpaperCleanPanel() {
+  if (m_cleanConfirmPanel == nullptr) {
+    return;
+  }
+  m_cleanConfirmPanel->setVisible(false);
+  m_cleanConfirmPanel->setParticipatesInLayout(false);
 }
 
 void WallpaperPanel::rebuildPalettePicker(const WallpaperFavorite* theme) {
@@ -1415,17 +1898,13 @@ std::size_t WallpaperPanel::segmentForPaletteSource(PaletteSource source) const 
 }
 
 WallpaperFavorite WallpaperPanel::activeThemeSettings() const {
-  // A selected favorite wallpaper's saved preset is the source of truth; otherwise the live global theme is.
-  WallpaperFavorite theme =
-      (m_config != nullptr) ? wallpaperFavoriteFromTheme(m_config->config().theme) : WallpaperFavorite{};
-  if (m_config != nullptr) {
-    if (const std::string path = selectedWallpaperPath(); !path.empty()) {
-      if (const WallpaperFavorite* favorite = m_config->wallpaperFavorite(path); favorite != nullptr) {
-        theme = *favorite;
-      }
-    }
+  if (m_config == nullptr) {
+    return {};
   }
-  return theme;
+  if (const std::string path = selectedWallpaperPath(); !path.empty()) {
+    return wallpaperFavoriteFromTheme(m_config->effectiveThemeForWallpaper(path).theme);
+  }
+  return wallpaperFavoriteFromTheme(m_config->config().theme);
 }
 
 void WallpaperPanel::applyThemeFromControls() {
@@ -1433,26 +1912,117 @@ void WallpaperPanel::applyThemeFromControls() {
     return;
   }
   const WallpaperFavorite theme = themeFromControls();
-  const std::string path = selectedWallpaperPath();
 
-  if (!path.empty() && m_config->isWallpaperFavorite(path)) {
-    // Edit the selected wallpaper's favorite preset and apply it live (also re-asserts the wallpaper).
+  if (m_colorScope == ColorScope::Global) {
     if (theme.themeMode.has_value()) {
-      m_config->setWallpaperFavoriteThemeMode(path, *theme.themeMode);
+      m_config->setThemeMode(*theme.themeMode);
     }
-    m_config->setWallpaperFavoritePaletteSource(path, theme.paletteSource);
-    m_config->setWallpaperFavoritePaletteSelection(path, paletteSelectionValue(theme));
-    applyWallpaperPath(path, &theme);
+    if (theme.paletteSource.has_value()) {
+      (void)m_config->setThemeColorScheme(*theme.paletteSource, paletteSelectionValue(theme));
+    }
     return;
   }
 
-  // No favorite target, so behave like the Settings window and change the global theme only.
-  if (theme.themeMode.has_value()) {
-    m_config->setThemeMode(*theme.themeMode);
+  const std::string path = selectedWallpaperPath();
+  if (path.empty() || path.starts_with("color:")) {
+    return;
   }
-  if (theme.paletteSource.has_value()) {
-    (void)m_config->setThemeColorScheme(*theme.paletteSource, paletteSelectionValue(theme));
+
+  WallpaperColorOverride overrideValue;
+  const WallpaperLinkGroup* group =
+      m_colorScope == ColorScope::Set ? m_config->linkGroupForPath(path) : nullptr;
+  if (group == nullptr) {
+    overrideValue.path = path;
+  } else {
+    overrideValue.linkGroup = group->id.empty() ? group->name : group->id;
+    const auto mapping = wallpaper::mapLinkedWallpaper(m_config->config().wallpaper, path);
+    overrideValue.match = mapping.has_value() ? mapping->relativePath
+                                               : std::filesystem::path(path).filename().string();
   }
+  overrideValue.themeMode = theme.themeMode;
+  overrideValue.paletteSource = theme.paletteSource;
+  overrideValue.builtinPalette = theme.builtinPalette;
+  overrideValue.communityPalette = theme.communityPalette;
+  overrideValue.customPalette = theme.customPalette;
+  overrideValue.wallpaperScheme = theme.wallpaperScheme;
+
+  auto overrides = m_config->config().wallpaper.colorOverrides;
+  const std::string normalizedPath = FileUtils::normalizeWallpaperPath(path);
+  const std::string basename = std::filesystem::path(path).filename().string();
+  std::erase_if(overrides, [&](const WallpaperColorOverride& existing) {
+    if (!overrideValue.linkGroup.empty()) {
+      return (existing.linkGroup == overrideValue.linkGroup
+              || existing.linkGroup == (group != nullptr ? group->name : std::string{}))
+          && (existing.match == overrideValue.match || existing.match == basename);
+    }
+    return existing.linkGroup.empty() && !existing.path.empty()
+        && FileUtils::normalizeWallpaperPath(existing.path) == normalizedPath;
+  });
+  overrides.push_back(std::move(overrideValue));
+  (void)m_config->setWallpaperColorOverrides(overrides);
+}
+
+bool WallpaperPanel::resetColorOverride() {
+  if (m_config == nullptr) {
+    return false;
+  }
+  const std::string path = selectedWallpaperPath();
+  if (path.empty() || path.starts_with("color:")) {
+    return false;
+  }
+
+  const WallpaperLinkGroup* group = m_config->linkGroupForPath(path);
+  const std::string normalizedPath = FileUtils::normalizeWallpaperPath(path);
+  const std::string basename = std::filesystem::path(path).filename().string();
+  const auto mapping = wallpaper::mapLinkedWallpaper(m_config->config().wallpaper, path);
+  const std::string relative = mapping.has_value() ? mapping->relativePath : std::string{};
+
+  auto overrides = m_config->config().wallpaper.colorOverrides;
+  const auto before = overrides.size();
+  std::erase_if(overrides, [&](const WallpaperColorOverride& existing) {
+    // A path override is more specific than a set override, but "Use global"
+    // clears every override that affects the selected image.
+    if (existing.linkGroup.empty() && !existing.path.empty()
+        && FileUtils::normalizeWallpaperPath(existing.path) == normalizedPath) {
+      return true;
+    }
+    if (group == nullptr || existing.linkGroup.empty()) {
+      return false;
+    }
+    if (existing.linkGroup != group->id && existing.linkGroup != group->name) {
+      return false;
+    }
+    return existing.match == basename || (!relative.empty() && existing.match == relative);
+  });
+  if (overrides.size() == before) {
+    return false;
+  }
+  return m_config->setWallpaperColorOverrides(overrides);
+}
+
+void WallpaperPanel::syncColorScope() {
+  if (m_colorScopeSegmented == nullptr || m_config == nullptr) {
+    return;
+  }
+  const bool hasManagedLinks = !m_config->config().wallpaper.links.empty();
+  const std::string path = selectedWallpaperPath();
+  const std::string scope =
+      path.empty() ? "global" : m_config->effectiveThemeForWallpaper(path).scope;
+
+  m_colorScopeSegmented->setEnabled(!path.empty());
+
+  m_syncingThemeControls = true;
+  if (scope == "set" && hasManagedLinks) {
+    m_colorScope = ColorScope::Set;
+    m_colorScopeSegmented->setSelectedIndex(1);
+  } else if (scope == "wallpaper") {
+    m_colorScope = ColorScope::Wallpaper;
+    m_colorScopeSegmented->setSelectedIndex(hasManagedLinks ? 2 : 1);
+  } else {
+    m_colorScope = ColorScope::Global;
+    m_colorScopeSegmented->setSelectedIndex(0);
+  }
+  m_syncingThemeControls = false;
 }
 
 void WallpaperPanel::syncThemeControls() {
@@ -1477,6 +2047,7 @@ void WallpaperPanel::syncThemeControls() {
 
   rebuildPalettePicker(&themeSettings);
   m_syncingThemeControls = false;
+  syncColorScope();
 }
 
 void WallpaperPanel::refreshScan() {
@@ -1534,21 +2105,40 @@ void WallpaperPanel::applyFilter() {
   std::unordered_set<std::string> favoritePaths;
   const auto dir = activeDirectoryForSelection();
   const auto rootDir = rootDirectoryForSelection();
-  appendFilteredFavoriteEntries(m_visibleEntries, favoritePaths, dir, rootDir);
+  const bool atRoot = !dir.empty() && wallpaperDirectoriesEquivalent(dir, rootDir);
+  const bool showRootFavorites =
+      !atRoot || (m_config != nullptr && m_config->config().wallpaper.showFavoritesAtRoot);
+  if (showRootFavorites) {
+    appendFilteredFavoriteEntries(m_visibleEntries, favoritePaths, dir, rootDir);
+  }
   m_pinnedFavoriteCount = m_visibleEntries.size();
+
+  const std::string needle = StringUtils::toLower(m_filterQuery);
+  const bool filterActive = !needle.empty();
+  // Inside a linked member directory the synthetic group is browsing its own
+  // source, so its files and subdirectories must stay visible; hide originals
+  // only above that point.
+  const bool browsingLinkMember = pathInsideHiddenLinkMemberDirectory(dir);
+  const bool hideOriginals = rootHidesLinkOriginals() && !browsingLinkMember;
+  if (atRoot) {
+    appendLinkGroupEntries(m_visibleEntries, filterActive, needle);
+  }
 
   const WallpaperScanResult* result =
       (dir.empty() || m_scanner == nullptr) ? nullptr : m_scanner->cached(dir, m_flatten);
   if (result != nullptr) {
-    const std::string needle = StringUtils::toLower(m_filterQuery);
-    const bool filterActive = !needle.empty();
     m_visibleEntries.reserve(m_visibleEntries.size() + result->entries.size());
     for (const auto& entry : result->entries) {
       if (!entry.isDir) {
-        const std::string normalized = FileUtils::normalizeWallpaperPath(entry.absPath.string());
+        const std::string normalized = canonicalWallpaperPathKey(entry.absPath);
         if (favoritePaths.contains(normalized)) {
           continue;
         }
+      }
+      if (hideOriginals && entry.isDir
+          && (pathInsideHiddenLinkMemberDirectory(entry.absPath)
+              || pathContainsHiddenLinkMemberDirectory(entry.absPath))) {
+        continue;
       }
       if (filterActive && !StringUtils::toLower(entry.name).contains(needle)) {
         continue;
@@ -1569,6 +2159,9 @@ void WallpaperPanel::rebindGrid(bool resetScroll) {
   }
   if (m_adapter != nullptr) {
     m_adapter->setCurrentWallpaperPath(currentWallpaperPathForSelection());
+    m_adapter->setStickySelectedIndex(
+        hasVisibleSelection() ? std::optional<std::size_t>{m_selectedVisibleIndex} : std::nullopt
+    );
   }
   m_grid->notifyDataChanged();
   if (resetScroll || m_visibleEntries.empty()) {
@@ -1593,13 +2186,8 @@ void WallpaperPanel::toggleFavoriteForPath(const std::string& path) {
   if (m_config->isWallpaperFavorite(path)) {
     m_config->removeWallpaperFavorite(path);
   } else {
-    std::optional<WallpaperFavorite> preset;
-    const std::string currentPath = currentWallpaperPathForSelection();
-    if (!currentPath.empty()
-        && FileUtils::normalizeWallpaperPath(path) == FileUtils::normalizeWallpaperPath(currentPath)) {
-      preset = wallpaperFavoriteFromTheme(m_config->config().theme);
-    }
-    m_config->addWallpaperFavorite(path, preset);
+    // Bookmarks store the path only; color comes from the effective-theme resolver.
+    m_config->addWallpaperFavorite(path);
   }
 
   refreshVisibleEntries();
@@ -1610,23 +2198,49 @@ void WallpaperPanel::toggleFavoriteForPath(const std::string& path) {
 }
 
 void WallpaperPanel::applyWallpaperPath(const std::string& path, const WallpaperFavorite* applyTheme) {
+  (void)applyTheme;
   if (m_config == nullptr || m_selectedMonitorIndex >= m_monitorChoices.size()) {
     return;
+  }
+
+  if (!path.starts_with("color:")) {
+    const auto mapping = wallpaper::mapLinkedWallpaper(m_config->config().wallpaper, path);
+    if (mapping.has_value()) {
+      std::map<std::string, std::string> paths;
+      for (const auto& target : mapping->targets) {
+        if (target.present) {
+          paths[target.monitor] = target.path;
+        }
+      }
+      if (!paths.empty()) {
+        m_config->setWallpaperPaths(paths, mapping->colorSourcePath);
+        if (!mapping->missingConnectors.empty()) {
+          std::string missing;
+          for (const auto& connector : mapping->missingConnectors) {
+            if (!missing.empty()) {
+              missing += ", ";
+            }
+            missing += connector;
+          }
+          kLog.warn("linked wallpaper missing targets: {}", missing);
+          notify::info(
+              "Noctalia", i18n::tr("wallpaper.panel.link-missing-title"),
+              i18n::tr("wallpaper.panel.link-missing-target", "monitors", missing)
+          );
+        }
+        rebindGrid();
+        syncBrowseChrome();
+        return;
+      }
+    }
   }
 
   const auto& choice = m_monitorChoices[m_selectedMonitorIndex];
   const std::optional<std::string> connector =
       choice.connector.empty() ? std::optional<std::string>{} : std::optional<std::string>{choice.connector};
-  m_config->applyWallpaperSelection(connector, path, applyTheme, allMonitorConnectors());
+  m_config->applyWallpaperSelection(connector, path, nullptr, allMonitorConnectors());
   rebindGrid();
   syncBrowseChrome();
-}
-
-const WallpaperFavorite* WallpaperPanel::favoriteThemeToApply(std::string_view path) const {
-  if (m_config == nullptr || !m_config->isWallpaperFavorite(path)) {
-    return nullptr;
-  }
-  return m_config->wallpaperFavorite(path);
 }
 
 WallpaperFavorite WallpaperPanel::themeFromControls() const {
@@ -1690,6 +2304,14 @@ void WallpaperPanel::activateSelectedEntry() {
 }
 
 bool WallpaperPanel::handleKeyEvent(std::uint32_t sym, std::uint32_t modifiers) {
+  if (KeybindMatcher::matches(KeybindAction::Cancel, sym, modifiers)) {
+    if (!m_navStack.empty()) {
+      navigateUp();
+      return true;
+    }
+    return false;
+  }
+
   if (m_visibleEntries.empty()) {
     return false;
   }
@@ -1760,6 +2382,28 @@ void WallpaperPanel::syncBackButton() {
     return;
   }
   const bool canNavigateUp = !m_navStack.empty();
+  std::string label = i18n::tr("wallpaper.panel.back");
+  if (canNavigateUp) {
+    std::string folder = m_navStack.back().filename().string();
+    if (m_config != nullptr) {
+      for (const auto& group : m_config->config().wallpaper.links) {
+        for (const auto& member : group.members) {
+          const auto directory = FileUtils::resolvePath(member.directory);
+          if (!directory.empty() && wallpaperDirectoriesEquivalent(m_navStack.back(), directory)) {
+            folder = group.name.empty() ? group.id : group.name;
+            break;
+          }
+        }
+        if (!folder.empty() && folder != m_navStack.back().filename().string()) {
+          break;
+        }
+      }
+    }
+    if (!folder.empty()) {
+      label += " · " + folder;
+    }
+  }
+  m_backButton->setText(label);
   m_backButton->setEnabled(canNavigateUp);
   m_backButton->setVisible(canNavigateUp);
 }
@@ -1998,8 +2642,28 @@ void WallpaperPanel::applyWallpaperFromEntry(const WallpaperEntry& entry) {
     return;
   }
 
+  // A click both selects and applies. Keep the clicked tile selected so the
+  // check badge and border remain visible after the grid rebinds, which is
+  // especially important for dark thumbnails.
+  for (std::size_t i = 0; i < m_visibleEntries.size(); ++i) {
+    if (m_visibleEntries[i].absPath == entry.absPath) {
+      m_selectedVisibleIndex = i;
+      // rebindGrid clears the visual selection unless the grid is considered
+      // keyboard-active; mouse selection must survive the apply/rebind too.
+      m_gridKeyboardActive = true;
+      break;
+    }
+  }
+
   const std::string path = entry.absPath.string();
-  applyWallpaperPath(path, favoriteThemeToApply(path));
+  applyWallpaperPath(path, nullptr);
+  if (m_grid != nullptr && hasVisibleSelection()) {
+    m_gridKeyboardActive = true;
+    m_syncingGridSelectionVisual = true;
+    m_grid->setSelectedIndex(m_selectedVisibleIndex);
+    m_syncingGridSelectionVisual = false;
+  }
+  syncThemeControls();
   kLog.info(
       "applied wallpaper {} to {}", path,
       m_selectedMonitorIndex == 0 ? "ALL" : m_monitorChoices[m_selectedMonitorIndex].connector

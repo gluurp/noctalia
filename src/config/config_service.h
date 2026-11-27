@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -28,6 +29,33 @@ class NotificationManager;
 struct OverrideDiagnostics {
   const noctalia::config::schema::Diagnostics* baseline = nullptr;  // for the persisted overrides
   const noctalia::config::schema::Diagnostics* candidate = nullptr; // for the candidate table
+};
+
+// Preview/result of cleanWallpaperReferences(). Paths are the exact strings from
+// the settings sidecar; `kept` holds stale paths whose parent folder is absent and
+// invalid link member directories, which the clean action deliberately leaves alone.
+struct WallpaperCleanReport {
+  std::vector<std::string> removed;
+  std::vector<std::string> kept;
+  std::size_t favoriteCount = 0;
+  std::size_t monitorCount = 0;
+  std::size_t pathCount = 0;
+  std::size_t colorOverrideCount = 0;
+  // False for a dry-run and for a real run that changed nothing or failed to write.
+  bool applied = false;
+
+  [[nodiscard]] bool empty() const noexcept { return removed.empty(); }
+};
+
+// Effective palette settings for one wallpaper path. `theme` starts from the
+// global [theme] and has only the fields a set/path override or legacy favorite
+// actually supplies applied. `scope` is "global", "favorite", "wallpaper", or
+// "set" for display; the config itself is never mutated.
+struct EffectiveWallpaperTheme {
+  ThemeConfig theme;
+  std::string scope = "global";
+  std::string sourcePath;
+  std::string linkGroup;
 };
 
 class ConfigService {
@@ -104,6 +132,38 @@ public:
   // Greeter sync fallback when no monitor-specific path is chosen.
   std::string getGreeterSyncWallpaperPath() const;
   void setWallpaperPath(const std::optional<std::string>& connectorName, const std::string& path);
+  // Atomic multi-output write for linked wallpapers: every connector path, the
+  // optional palette reference, and `last` move in one table mutation with one
+  // settings.toml write and one wallpaper-change callback. A path under the
+  // empty connector key sets `wallpaper.default`.
+  bool setWallpaperPaths(
+      const std::map<std::string, std::string>& paths, const std::optional<std::string>& palettePath
+  );
+
+  // Typed whole-table persistence for linked groups and color overrides. These
+  // replace the whole `[wallpaper].link` map / `color_override` array in one
+  // write and never address individual member rows by index.
+  bool setWallpaperLinkGroups(const std::vector<WallpaperLinkGroup>& groups);
+  bool setWallpaperColorOverrides(const std::vector<WallpaperColorOverride>& overrides);
+  bool setWallpaperColorEntries(const std::vector<WallpaperColorOverride>& entries);
+  const WallpaperColorOverride* wallpaperColorEntryForPath(std::string_view path) const;
+
+  // Effective merged-config lookups for the wallpaper engine.
+  const WallpaperLinkGroup* linkGroupForMonitor(std::string_view connector) const;
+  const WallpaperLinkGroup* linkGroupForPath(std::string_view path) const;
+  // Set-level override for a path that belongs to a link group, else the
+  // path-level override. Null when neither exists.
+  const WallpaperColorOverride* colorOverrideForPath(std::string_view path) const;
+
+  // Remove stale app-managed wallpaper references whose parent folder still
+  // exists. With dryRun the report is a preview and nothing is written; otherwise
+  // one validated table mutation is written and the config reloads once.
+  WallpaperCleanReport cleanWallpaperReferences(bool dryRun);
+
+  // Resolve the palette settings that apply to `path`: linked-set override,
+  // exact path override, legacy favorite fields, then global [theme]. Only
+  // supplied fields are applied; partial or malformed entries fall through.
+  EffectiveWallpaperTheme effectiveThemeForWallpaper(const std::string& path) const;
   void setWallpaperChangeCallback(ChangeCallback callback);
 
   const std::vector<WallpaperFavorite>& wallpaperFavorites() const noexcept;
@@ -114,6 +174,7 @@ public:
   void setWallpaperFavoriteThemeMode(std::string_view path, ThemeMode themeMode);
   void setWallpaperFavoritePaletteSource(std::string_view path, std::optional<PaletteSource> source);
   void setWallpaperFavoritePaletteSelection(std::string_view path, std::string_view value);
+  void clearWallpaperFavoritePalette(std::string_view path);
   void applyWallpaperSelection(
       const std::optional<std::string>& connectorName, const std::string& path, const WallpaperFavorite* applyTheme,
       const std::vector<std::string>& allConnectors
@@ -277,6 +338,9 @@ private:
   std::unordered_set<std::string> m_configFileCalendarAccountNames;
   std::string m_defaultWallpaperPath;
   std::string m_lastWallpaperPath;
+  // Dedicated palette reference written by linked applies. Takes precedence over
+  // `last` so a linked set can pick its color-source member independently.
+  std::string m_paletteWallpaperPath;
   std::unordered_map<std::string, std::string> m_monitorWallpaperPaths;
   std::vector<WallpaperFavorite> m_wallpaperFavorites;
   mutable std::unordered_map<std::string, bool> m_effectiveOverrideCache;

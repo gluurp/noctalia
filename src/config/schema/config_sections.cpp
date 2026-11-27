@@ -45,7 +45,7 @@ namespace noctalia::config::schema {
         // ConfigService reads separately — those keys are not settings.
         SectionSpec wallpaper = makeSection("wallpaper", &Config::wallpaper, wallpaperSchema());
         wallpaper.allowUnknownPaths = {
-            "wallpaper.default", "wallpaper.last", "wallpaper.monitors", "wallpaper.favorite"
+            "wallpaper.default", "wallpaper.last", "wallpaper.monitors", "wallpaper.favorite", "wallpaper.palette"
         };
         t.push_back(std::move(wallpaper));
 

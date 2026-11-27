@@ -2,6 +2,8 @@
 #include "config/config_merge.h"
 #include "config/config_service.h"
 #include "config/config_validate.h"
+#include "config/schema/config_schema.h"
+#include "config/schema/engine.h"
 #include "config/schema/ranges.h"
 #include "config/widget_config.h"
 #include "core/files/resource_paths.h"
@@ -24,6 +26,7 @@
 #include <set>
 #include <sstream>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -907,6 +910,65 @@ namespace {
     }
     const auto& key = path[4];
     return key == "start" || key == "center" || key == "end";
+  }
+
+  // Relative path of `file` inside `directory`, or nullopt when it is not a
+  // descendant. Lexical, so a missing file still maps.
+  std::optional<std::filesystem::path>
+  relativePathInside(const std::filesystem::path& file, const std::filesystem::path& directory) {
+    if (directory.empty()) {
+      return std::nullopt;
+    }
+    std::error_code ec;
+    const auto rel = std::filesystem::relative(file, directory, ec);
+    if (ec || rel.empty()) {
+      return std::nullopt;
+    }
+    const auto first = rel.begin();
+    if (first != rel.end() && *first == "..") {
+      return std::nullopt;
+    }
+    return rel;
+  }
+
+  // The group-relative identity of `path` for a link member directory.
+  std::optional<std::string> linkRelativePath(const WallpaperLinkGroup& group, std::string_view path) {
+    const std::filesystem::path file(FileUtils::normalizeWallpaperPath(path));
+    for (const auto& member : group.members) {
+      if (member.directory.empty()) {
+        continue;
+      }
+      if (const auto rel = relativePathInside(file, std::filesystem::path(member.directory))) {
+        return rel->generic_string();
+      }
+    }
+    return std::nullopt;
+  }
+
+  enum class MissingPathState : std::uint8_t {
+    Present = 0,      // path exists, or is a color: entry
+    Removable,        // missing file with an existing parent directory
+    ParentMissing,    // missing file whose parent is absent too: keep it
+  };
+
+  MissingPathState classifyMissingPath(std::string_view rawPath) {
+    if (rawPath.empty() || rawPath.starts_with("color:")) {
+      return MissingPathState::Present;
+    }
+    const std::filesystem::path expanded =
+        FileUtils::expandUserPath(FileUtils::expandEnvVars(std::string(rawPath)));
+    std::error_code ec;
+    if (std::filesystem::exists(expanded, ec) || ec) {
+      return MissingPathState::Present;
+    }
+    const std::filesystem::path parent = expanded.parent_path();
+    if (parent.empty()) {
+      return MissingPathState::ParentMissing;
+    }
+    if (std::filesystem::exists(parent, ec) && !ec) {
+      return MissingPathState::Removable;
+    }
+    return MissingPathState::ParentMissing;
   }
 
 } // namespace
@@ -2269,6 +2331,9 @@ std::string ConfigService::getPaletteWallpaperPath() const {
   if (const std::string bundled = fallbackWallpaperPath(); !bundled.empty()) {
     return bundled;
   }
+  if (!m_paletteWallpaperPath.empty()) {
+    return m_paletteWallpaperPath;
+  }
   if (!m_lastWallpaperPath.empty()) {
     return m_lastWallpaperPath;
   }
@@ -2326,12 +2391,19 @@ void ConfigService::setWallpaperPath(const std::optional<std::string>& connector
     changed = true;
   }
 
-  if (!changed) {
+  // A direct single-path write supersedes a pending linked palette reference, so
+  // palette generation follows this wallpaper instead of a stale linked source.
+  const bool clearingPalette = !m_paletteWallpaperPath.empty();
+  if (!changed && !clearingPalette) {
     return;
   }
 
   // Mirror the change into the overrides table so writeOverridesToFile() serializes it.
   auto* wallpaperTbl = ensureTable(m_overridesTable, "wallpaper");
+  if (clearingPalette) {
+    m_paletteWallpaperPath.clear();
+    wallpaperTbl->erase("palette");
+  }
   if (connectorName.has_value()) {
     auto* monitorsTbl = ensureTable(*wallpaperTbl, "monitors");
     auto* monTbl = ensureTable(*monitorsTbl, *connectorName);
@@ -2360,11 +2432,611 @@ void ConfigService::setWallpaperPath(const std::optional<std::string>& connector
   }
 }
 
+bool ConfigService::setWallpaperPaths(
+    const std::map<std::string, std::string>& paths, const std::optional<std::string>& palettePath
+) {
+  if (m_overridesPath.empty()) {
+    return false;
+  }
+
+  bool changed = false;
+  auto* wallpaperTbl = ensureTable(m_overridesTable, "wallpaper");
+  std::optional<std::string> defaultPath;
+  std::string lastCandidate;
+
+  for (const auto& [connector, path] : paths) {
+    if (connector.empty()) {
+      defaultPath = path;
+      continue;
+    }
+    auto it = m_monitorWallpaperPaths.find(connector);
+    if (it == m_monitorWallpaperPaths.end() || it->second != path) {
+      m_monitorWallpaperPaths[connector] = path;
+      changed = true;
+    }
+    auto* monitorsTbl = ensureTable(*wallpaperTbl, "monitors");
+    auto* monTbl = ensureTable(*monitorsTbl, connector);
+    monTbl->insert_or_assign("path", path);
+    if (lastCandidate.empty()) {
+      lastCandidate = path;
+    }
+  }
+
+  if (defaultPath.has_value()) {
+    if (m_defaultWallpaperPath != *defaultPath) {
+      m_defaultWallpaperPath = *defaultPath;
+      changed = true;
+    }
+    auto* defaultTbl = ensureTable(*wallpaperTbl, "default");
+    defaultTbl->insert_or_assign("path", *defaultPath);
+    if (lastCandidate.empty()) {
+      lastCandidate = *defaultPath;
+    }
+  }
+
+  if (palettePath.has_value()) {
+    // The palette reference follows the color-source member and supersedes
+    // `last` as the image palette generation uses.
+    lastCandidate = *palettePath;
+    if (m_paletteWallpaperPath != *palettePath) {
+      m_paletteWallpaperPath = *palettePath;
+      changed = true;
+    }
+    auto* paletteTbl = ensureTable(*wallpaperTbl, "palette");
+    paletteTbl->insert_or_assign("path", *palettePath);
+  }
+
+  if (!lastCandidate.empty() && m_lastWallpaperPath != lastCandidate) {
+    m_lastWallpaperPath = lastCandidate;
+    changed = true;
+    auto* lastTbl = ensureTable(*wallpaperTbl, "last");
+    lastTbl->insert_or_assign("path", lastCandidate);
+  }
+
+  if (!changed) {
+    return false;
+  }
+
+  if (!writeOverridesToFile()) {
+    kLog.warn("failed to write {}", m_overridesPath);
+    return false;
+  }
+
+  m_ownOverridesWritePending = true;
+  if (m_wallpaperBatchDepth > 0) {
+    m_wallpaperBatchDirty = true;
+    return true;
+  }
+  if (m_wallpaperChangeCallback) {
+    m_wallpaperChangeCallback();
+  }
+  return true;
+}
+
+bool ConfigService::setWallpaperLinkGroups(const std::vector<WallpaperLinkGroup>& groups) {
+  if (m_overridesPath.empty()) {
+    return false;
+  }
+
+  std::vector<WallpaperLinkGroup> normalized;
+  normalized.reserve(groups.size());
+  for (auto group : groups) {
+    if (group.id.empty()) {
+      group.id = group.name;
+    }
+    if (group.id.empty()) {
+      continue;
+    }
+    if (group.name.empty()) {
+      group.name = group.id;
+    }
+    std::unordered_set<std::string> seenMonitors;
+    std::erase_if(group.members, [&](const WallpaperLinkMember& member) {
+      return member.monitor.empty() || member.directory.empty() || !seenMonitors.insert(member.monitor).second;
+    });
+    normalized.push_back(std::move(group));
+  }
+
+  // Reuse the wallpaper schema writer so the persisted shape is exactly what the
+  // reader expects (names, enum keys, guarded member arrays).
+  WallpaperConfig container;
+  container.links = std::move(normalized);
+  const toml::table serialized =
+      noctalia::config::schema::writeTable(container, noctalia::config::schema::wallpaperSchema());
+
+  auto* wallpaperTbl = ensureTable(m_overridesTable, "wallpaper");
+  if (const toml::node* linkNode = serialized.get("link");
+      linkNode != nullptr && linkNode->as_table() != nullptr && !linkNode->as_table()->empty()) {
+    wallpaperTbl->insert_or_assign("link", *linkNode);
+  } else {
+    wallpaperTbl->erase("link");
+  }
+
+  if (!writeOverridesToFile()) {
+    kLog.warn("failed to write {}", m_overridesPath);
+    return false;
+  }
+
+  m_ownOverridesWritePending = true;
+  loadAll();
+  fireReloadCallbacks();
+  if (m_wallpaperChangeCallback) {
+    m_wallpaperChangeCallback();
+  }
+  return true;
+}
+
+bool ConfigService::setWallpaperColorOverrides(const std::vector<WallpaperColorOverride>& overrides) {
+  if (m_overridesPath.empty()) {
+    return false;
+  }
+
+  std::vector<WallpaperColorOverride> normalized;
+  normalized.reserve(overrides.size());
+  for (auto overrideValue : overrides) {
+    if (!overrideValue.path.empty()) {
+      overrideValue.path = FileUtils::normalizeWallpaperPath(overrideValue.path);
+      overrideValue.linkGroup.clear();
+      overrideValue.match.clear();
+    } else if (overrideValue.linkGroup.empty() || overrideValue.match.empty()) {
+      continue;
+    }
+    normalized.push_back(std::move(overrideValue));
+  }
+
+  WallpaperConfig container;
+  container.colorOverrides = std::move(normalized);
+  const toml::table serialized =
+      noctalia::config::schema::writeTable(container, noctalia::config::schema::wallpaperSchema());
+
+  auto* wallpaperTbl = ensureTable(m_overridesTable, "wallpaper");
+  if (const toml::node* overridesNode = serialized.get("color_override");
+      overridesNode != nullptr && overridesNode->as_array() != nullptr && !overridesNode->as_array()->empty()) {
+    wallpaperTbl->insert_or_assign("color_override", *overridesNode);
+  } else {
+    wallpaperTbl->erase("color_override");
+  }
+
+  if (!writeOverridesToFile()) {
+    kLog.warn("failed to write {}", m_overridesPath);
+    return false;
+  }
+
+  m_ownOverridesWritePending = true;
+  loadAll();
+  fireReloadCallbacks();
+  if (m_wallpaperChangeCallback) {
+    m_wallpaperChangeCallback();
+  }
+  return true;
+}
+
+bool ConfigService::setWallpaperColorEntries(const std::vector<WallpaperColorOverride>& entries) {
+  if (m_overridesPath.empty()) {
+    return false;
+  }
+
+  std::vector<WallpaperColorOverride> normalized;
+  normalized.reserve(entries.size());
+  for (auto entry : entries) {
+    if (entry.path.empty()) {
+      continue;
+    }
+    entry.path = FileUtils::normalizeWallpaperPath(entry.path);
+    entry.linkGroup.clear();
+    entry.match.clear();
+    normalized.push_back(std::move(entry));
+  }
+
+  WallpaperConfig container;
+  container.entries = std::move(normalized);
+  const toml::table serialized =
+      noctalia::config::schema::writeTable(container, noctalia::config::schema::wallpaperSchema());
+  auto* wallpaperTbl = ensureTable(m_overridesTable, "wallpaper");
+  if (const toml::node* entriesNode = serialized.get("entry");
+      entriesNode != nullptr && entriesNode->as_array() != nullptr && !entriesNode->as_array()->empty()) {
+    wallpaperTbl->insert_or_assign("entry", *entriesNode);
+  } else {
+    wallpaperTbl->erase("entry");
+  }
+
+  if (!writeOverridesToFile()) {
+    kLog.warn("failed to write {}", m_overridesPath);
+    return false;
+  }
+  m_ownOverridesWritePending = true;
+  loadAll();
+  fireReloadCallbacks();
+  if (m_wallpaperChangeCallback) {
+    m_wallpaperChangeCallback();
+  }
+  return true;
+}
+
+const WallpaperLinkGroup* ConfigService::linkGroupForMonitor(std::string_view connector) const {
+  if (connector.empty()) {
+    return nullptr;
+  }
+  for (const auto& group : m_config.wallpaper.links) {
+    for (const auto& member : group.members) {
+      if (member.monitor == connector) {
+        return &group;
+      }
+    }
+  }
+  return nullptr;
+}
+
+const WallpaperLinkGroup* ConfigService::linkGroupForPath(std::string_view path) const {
+  if (path.empty() || path.starts_with("color:")) {
+    return nullptr;
+  }
+  for (const auto& group : m_config.wallpaper.links) {
+    if (linkRelativePath(group, path).has_value()) {
+      return &group;
+    }
+  }
+  return nullptr;
+}
+
+const WallpaperColorOverride* ConfigService::wallpaperColorEntryForPath(std::string_view path) const {
+  if (path.empty() || path.starts_with("color:")) {
+    return nullptr;
+  }
+  const std::string normalized = FileUtils::normalizeWallpaperPath(path);
+  for (const auto& entry : m_config.wallpaper.entries) {
+    if (!entry.path.empty() && FileUtils::normalizeWallpaperPath(entry.path) == normalized) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+const WallpaperColorOverride* ConfigService::colorOverrideForPath(std::string_view path) const {
+  if (path.empty() || path.starts_with("color:")) {
+    return nullptr;
+  }
+
+  if (const WallpaperColorOverride* entry = wallpaperColorEntryForPath(path); entry != nullptr) {
+    return entry;
+  }
+
+  // A path override is more specific than a linked-set override, including
+  // when the path belongs to a linked group.
+  const std::string normalized = FileUtils::normalizeWallpaperPath(path);
+  for (const auto& overrideValue : m_config.wallpaper.colorOverrides) {
+    if (!overrideValue.linkGroup.empty() || overrideValue.path.empty()) {
+      continue;
+    }
+    if (FileUtils::normalizeWallpaperPath(overrideValue.path) == normalized) {
+      return &overrideValue;
+    }
+  }
+
+  if (const WallpaperLinkGroup* group = linkGroupForPath(path); group != nullptr) {
+    const auto relative = linkRelativePath(*group, path);
+    if (relative.has_value()) {
+      const std::string basename = std::filesystem::path(*relative).filename().string();
+      for (const auto& overrideValue : m_config.wallpaper.colorOverrides) {
+        if (overrideValue.linkGroup != group->id && overrideValue.linkGroup != group->name) {
+          continue;
+        }
+        if (overrideValue.match == *relative
+            || (!overrideValue.match.empty() && overrideValue.match == basename)) {
+          return &overrideValue;
+        }
+      }
+    }
+  }
+
+  return nullptr;
+}
+
+EffectiveWallpaperTheme ConfigService::effectiveThemeForWallpaper(const std::string& path) const {
+  EffectiveWallpaperTheme result;
+  result.theme = m_config.theme;
+  result.scope = "global";
+  result.sourcePath = path;
+  if (path.empty()) {
+    return result;
+  }
+  if (!path.starts_with("color:")) {
+    result.sourcePath = FileUtils::normalizeWallpaperPath(path);
+  }
+
+  const WallpaperLinkGroup* group = linkGroupForPath(path);
+  if (group != nullptr) {
+    result.linkGroup = group->id.empty() ? group->name : group->id;
+  }
+
+  const auto paletteValueFor = [](const WallpaperColorOverride& overrideValue) -> std::string {
+    switch (overrideValue.paletteSource.value_or(PaletteSource::Builtin)) {
+    case PaletteSource::Builtin:
+      return overrideValue.builtinPalette;
+    case PaletteSource::Wallpaper:
+      return overrideValue.wallpaperScheme;
+    case PaletteSource::Community:
+      return overrideValue.communityPalette;
+    case PaletteSource::Custom:
+      return overrideValue.customPalette;
+    }
+    return {};
+  };
+
+  const auto applySource = [](ThemeConfig& theme, PaletteSource source, const std::string& value) {
+    if (value.empty()) {
+      return false;
+    }
+    theme.source = source;
+    switch (source) {
+    case PaletteSource::Builtin:
+      theme.builtinPalette = value;
+      break;
+    case PaletteSource::Wallpaper:
+      theme.wallpaperScheme = value;
+      break;
+    case PaletteSource::Community:
+      theme.communityPalette = value;
+      break;
+    case PaletteSource::Custom:
+      theme.customPalette = value;
+      break;
+    }
+    return true;
+  };
+
+  if (const WallpaperColorOverride* overrideValue = colorOverrideForPath(path); overrideValue != nullptr) {
+    bool applied = false;
+    if (overrideValue->themeMode.has_value()) {
+      result.theme.mode = *overrideValue->themeMode;
+      applied = true;
+    }
+    if (overrideValue->paletteSource.has_value()) {
+      if (applySource(result.theme, *overrideValue->paletteSource, paletteValueFor(*overrideValue))) {
+        applied = true;
+      }
+    }
+    if (applied) {
+      result.scope = overrideValue->path.empty() ? "set" : "wallpaper";
+      return result;
+    }
+  }
+
+  if (const WallpaperFavorite* favorite = wallpaperFavorite(path); favorite != nullptr) {
+    bool applied = false;
+    if (favorite->themeMode.has_value()) {
+      result.theme.mode = *favorite->themeMode;
+      applied = true;
+    }
+    if (favorite->paletteSource.has_value()) {
+      WallpaperColorOverride legacy;
+      legacy.paletteSource = favorite->paletteSource;
+      legacy.builtinPalette = favorite->builtinPalette;
+      legacy.communityPalette = favorite->communityPalette;
+      legacy.customPalette = favorite->customPalette;
+      legacy.wallpaperScheme = favorite->wallpaperScheme;
+      if (applySource(result.theme, *favorite->paletteSource, paletteValueFor(legacy))) {
+        applied = true;
+      }
+    }
+    if (applied) {
+      result.scope = "favorite";
+      return result;
+    }
+  }
+
+  return result;
+}
+
+WallpaperCleanReport ConfigService::cleanWallpaperReferences(bool dryRun) {
+  WallpaperCleanReport report;
+  if (m_overridesPath.empty()) {
+    return report;
+  }
+
+  toml::table next = m_overridesTable;
+  auto* wallpaper = next["wallpaper"].as_table();
+  if (wallpaper == nullptr) {
+    return report;
+  }
+
+  const auto classifyAndCount = [&report](const std::string& value, std::size_t* counter) {
+    switch (classifyMissingPath(value)) {
+    case MissingPathState::Removable:
+      report.removed.push_back(value);
+      if (counter != nullptr) {
+        ++*counter;
+      }
+      return true;
+    case MissingPathState::ParentMissing:
+      report.kept.push_back(value);
+      return false;
+    case MissingPathState::Present:
+      return false;
+    }
+    return false;
+  };
+
+  const auto cleanSingularPath = [&](toml::table& parent, std::string_view key, std::size_t* counter) {
+    auto* holder = parent[key].as_table();
+    if (holder == nullptr) {
+      return;
+    }
+    const auto path = (*holder)["path"].value<std::string>();
+    if (!path.has_value()) {
+      return;
+    }
+    if (classifyAndCount(*path, counter)) {
+      holder->erase("path");
+      if (holder->empty()) {
+        parent.erase(key);
+      }
+    }
+  };
+
+  cleanSingularPath(*wallpaper, "default", &report.pathCount);
+  cleanSingularPath(*wallpaper, "last", &report.pathCount);
+  cleanSingularPath(*wallpaper, "palette", &report.pathCount);
+
+  if (auto* monitors = (*wallpaper)["monitors"].as_table(); monitors != nullptr) {
+    std::vector<std::string> connectors;
+    connectors.reserve(monitors->size());
+    for (const auto& [connector, node] : *monitors) {
+      (void)node;
+      connectors.emplace_back(connector.str());
+    }
+    for (const std::string& connector : connectors) {
+      auto* monitor = (*monitors)[connector].as_table();
+      if (monitor == nullptr) {
+        monitors->erase(connector);
+        continue;
+      }
+      const auto path = (*monitor)["path"].value<std::string>();
+      if (!path.has_value()) {
+        continue;
+      }
+      if (classifyAndCount(*path, &report.monitorCount)) {
+        monitor->erase("path");
+        if (monitor->empty()) {
+          monitors->erase(connector);
+        }
+      }
+    }
+    if (monitors->empty()) {
+      wallpaper->erase("monitors");
+    }
+  }
+
+  if (auto* favorites = (*wallpaper)["favorite"].as_array(); favorites != nullptr) {
+    toml::array keptFavorites;
+    bool changed = false;
+    for (const auto& node : *favorites) {
+      const auto* favorite = node.as_table();
+      if (favorite == nullptr) {
+        keptFavorites.push_back(node);
+        continue;
+      }
+      const auto path = (*favorite)["path"].value<std::string>();
+      if (path.has_value() && classifyAndCount(*path, &report.favoriteCount)) {
+        changed = true;
+        continue;
+      }
+      keptFavorites.push_back(node);
+    }
+    if (changed) {
+      if (keptFavorites.empty()) {
+        wallpaper->erase("favorite");
+      } else {
+        wallpaper->insert_or_assign("favorite", std::move(keptFavorites));
+      }
+    }
+  }
+
+  if (auto* overrides = (*wallpaper)["color_override"].as_array(); overrides != nullptr) {
+    toml::array keptOverrides;
+    bool changed = false;
+    for (const auto& node : *overrides) {
+      const auto* overrideValue = node.as_table();
+      if (overrideValue == nullptr) {
+        keptOverrides.push_back(node);
+        continue;
+      }
+      const auto group = (*overrideValue)["link_group"].value<std::string>();
+      const auto path = (*overrideValue)["path"].value<std::string>();
+      const bool linkedSetOverride = group.has_value() && !group->empty();
+      if (linkedSetOverride || !path.has_value()) {
+        keptOverrides.push_back(node);
+        continue;
+      }
+      if (classifyAndCount(*path, &report.colorOverrideCount)) {
+        changed = true;
+        continue;
+      }
+      keptOverrides.push_back(node);
+    }
+    if (changed) {
+      if (keptOverrides.empty()) {
+        wallpaper->erase("color_override");
+      } else {
+        wallpaper->insert_or_assign("color_override", std::move(keptOverrides));
+      }
+    }
+  }
+
+  // Link groups are never deleted or rewritten; missing member directories are
+  // reported so the user can fix them in the editor.
+  if (auto* links = (*wallpaper)["link"].as_table(); links != nullptr) {
+    for (const auto& [groupKey, groupNode] : *links) {
+      const auto* group = groupNode.as_table();
+      if (group == nullptr) {
+        report.kept.push_back("link:" + std::string(groupKey.str()) + " (not a table)");
+        continue;
+      }
+      const auto* members = (*group)["member"].as_array();
+      if (members == nullptr) {
+        report.kept.push_back("link:" + std::string(groupKey.str()) + " (no members)");
+        continue;
+      }
+      for (const auto& memberNode : *members) {
+        const auto* member = memberNode.as_table();
+        if (member == nullptr) {
+          report.kept.push_back("link:" + std::string(groupKey.str()) + " (invalid member)");
+          continue;
+        }
+        const auto directory = (*member)["directory"].value<std::string>();
+        if (!directory.has_value() || directory->empty()) {
+          report.kept.push_back("link:" + std::string(groupKey.str()) + " (member without directory)");
+          continue;
+        }
+        std::error_code ec;
+        const auto expanded = FileUtils::expandUserPath(FileUtils::expandEnvVars(*directory));
+        if (!std::filesystem::exists(expanded, ec) || ec) {
+          report.kept.push_back(*directory);
+        }
+      }
+    }
+  }
+
+  if (report.removed.empty()) {
+    return report;
+  }
+  if (dryRun) {
+    return report;
+  }
+
+  if (wallpaper->empty()) {
+    next.erase("wallpaper");
+  }
+
+  toml::table previous = m_overridesTable;
+  m_overridesTable = std::move(next);
+  if (!writeOverridesToFile()) {
+    kLog.warn("failed to write cleaned wallpaper references to {}", m_overridesPath);
+    m_overridesTable = std::move(previous);
+    report.removed.clear();
+    report.favoriteCount = 0;
+    report.monitorCount = 0;
+    report.pathCount = 0;
+    report.colorOverrideCount = 0;
+    return report;
+  }
+
+  report.applied = true;
+  m_ownOverridesWritePending = true;
+  loadAll();
+  fireReloadCallbacks();
+  if (m_wallpaperChangeCallback) {
+    m_wallpaperChangeCallback();
+  }
+  return report;
+}
+
 void ConfigService::extractWallpaperFromOverrides() { extractWallpaperFromTable(m_overridesTable); }
 
 void ConfigService::extractWallpaperFromTable(const toml::table& table) {
   m_defaultWallpaperPath.clear();
   m_lastWallpaperPath.clear();
+  m_paletteWallpaperPath.clear();
   m_monitorWallpaperPaths.clear();
   m_wallpaperFavorites.clear();
 
@@ -2376,6 +3048,11 @@ void ConfigService::extractWallpaperFromTable(const toml::table& table) {
   if (const auto* wpLast = table["wallpaper"]["last"].as_table()) {
     if (auto v = (*wpLast)["path"].value<std::string>()) {
       m_lastWallpaperPath = FileUtils::expandUserPath(*v).string();
+    }
+  }
+  if (const auto* wpPalette = table["wallpaper"]["palette"].as_table()) {
+    if (auto v = (*wpPalette)["path"].value<std::string>()) {
+      m_paletteWallpaperPath = FileUtils::expandUserPath(*v).string();
     }
   }
   if (const auto* monitors = table["wallpaper"]["monitors"].as_table()) {
@@ -2673,6 +3350,40 @@ void ConfigService::setWallpaperFavoritePaletteSelection(std::string_view path, 
   m_ownOverridesWritePending = true;
 }
 
+void ConfigService::clearWallpaperFavoritePalette(std::string_view path) {
+  if (m_overridesPath.empty()) {
+    return;
+  }
+  const std::string normalized = FileUtils::normalizeWallpaperPath(path);
+  bool changed = false;
+  for (auto& favorite : m_wallpaperFavorites) {
+    if (favorite.path != normalized) {
+      continue;
+    }
+    if (favorite.themeMode.has_value() || favorite.paletteSource.has_value()
+        || !favorite.builtinPalette.empty() || !favorite.communityPalette.empty()
+        || !favorite.customPalette.empty() || !favorite.wallpaperScheme.empty()) {
+      favorite.themeMode.reset();
+      favorite.paletteSource.reset();
+      favorite.builtinPalette.clear();
+      favorite.communityPalette.clear();
+      favorite.customPalette.clear();
+      favorite.wallpaperScheme.clear();
+      changed = true;
+    }
+    break;
+  }
+  if (!changed) {
+    return;
+  }
+  syncWallpaperFavoritesToOverridesTable();
+  if (!writeOverridesToFile()) {
+    kLog.warn("failed to write {}", m_overridesPath);
+    return;
+  }
+  m_ownOverridesWritePending = true;
+}
+
 void ConfigService::applyWallpaperSelection(
     const std::optional<std::string>& connectorName, const std::string& path, const WallpaperFavorite* applyTheme,
     const std::vector<std::string>& allConnectors
@@ -2763,6 +3474,13 @@ void ConfigService::applyWallpaperSelection(
     changed = true;
     auto* lastTbl = ensureTable(*wallpaperTbl, "last");
     lastTbl->insert_or_assign("path", path);
+  }
+
+  // A non-linked apply supersedes any linked palette reference.
+  if (!m_paletteWallpaperPath.empty()) {
+    m_paletteWallpaperPath.clear();
+    wallpaperTbl->erase("palette");
+    changed = true;
   }
 
   if (!changed) {

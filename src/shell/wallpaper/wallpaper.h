@@ -35,6 +35,16 @@ struct WallpaperChange {
   std::string connector;
 };
 
+// Outcome of the most recent engine apply. For a linked path `linked` is true
+// and the connector lists describe the whole set, so callers can report which
+// monitors changed, which had no matching file, and which member drove colors.
+struct WallpaperApplyResult {
+  bool linked = false;
+  std::vector<std::string> appliedConnectors;
+  std::vector<std::string> missingConnectors;
+  std::string colorSourceMonitor;
+};
+
 class Wallpaper {
 public:
   Wallpaper();
@@ -75,6 +85,12 @@ public:
   // previews while their UI is closed.
   Signal<>& changed() noexcept { return m_changed; }
 
+  // Result of the last engine apply (linked sets report every member).
+  const WallpaperApplyResult& lastApplyResult() const noexcept { return m_lastApplyResult; }
+  // Non-empty while automation is skipping linked monitors because rotation is
+  // not link-aware yet; cleared once a run no longer encounters a linked one.
+  const std::string& automationWarning() const noexcept { return m_automationWarning; }
+
 private:
   enum class TransitionRedirect {
     Unrelated,
@@ -99,6 +115,11 @@ private:
   // Persist a resolved image path to a single connector, or to every connected
   // output plus the default when no connector is given.
   void applyResolvedWallpaper(const std::optional<std::string>& connector, const std::string& resolvedPath);
+  // Expand an applied member path to every monitor in its link group. Returns
+  // false when the path is not part of a group, so the caller falls back to the
+  // normal single-monitor apply.
+  bool applyLinkedResolvedWallpaper(const std::string& resolvedPath);
+  void noteAutomationLinkSkip(std::string_view connector);
   void reload();
   void syncInstances();
   void applyStartupAutomation(std::int64_t secondStamp);
@@ -155,6 +176,8 @@ private:
   wallpaper::ShuffleState m_shuffleState;
   Signal<>::ScopedConnection m_paletteConn;
   Signal<> m_changed;
+  WallpaperApplyResult m_lastApplyResult;
+  std::string m_automationWarning;
   std::vector<std::unique_ptr<WallpaperInstance>> m_instances;
   std::unordered_set<std::string> m_externallyManagedOutputs;
 };

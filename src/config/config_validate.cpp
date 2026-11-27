@@ -822,12 +822,78 @@ namespace noctalia::config {
       }
     }
 
+    // [wallpaper.link.<group>] groups are keyed by name, so two groups can name the
+    // same connector. Report that here; the per-group schema only sees one group at
+    // a time. A malformed member table (a table instead of an array of tables) is an
+    // error so it is never read as an empty group and serialized back as empty.
+    void validateWallpaperLinks(const toml::table& merged, schema::Diagnostics& diag) {
+      const auto* wallpaper = merged["wallpaper"].as_table();
+      if (wallpaper == nullptr) {
+        return;
+      }
+      const toml::node* linkNode = wallpaper->get("link");
+      if (linkNode == nullptr) {
+        return;
+      }
+      const auto* linkTable = linkNode->as_table();
+      if (linkTable == nullptr) {
+        diag.error("wallpaper.link", "must be a table");
+        return;
+      }
+      std::unordered_map<std::string, std::string> monitorOwner;
+      for (const auto& [groupKey, groupNode] : *linkTable) {
+        const std::string groupPath = "wallpaper.link." + std::string(groupKey.str());
+        const auto* group = groupNode.as_table();
+        if (group == nullptr) {
+          diag.error(groupPath, "must be a table");
+          continue;
+        }
+        const toml::node* memberNode = group->get("member");
+        if (memberNode == nullptr) {
+          continue;
+        }
+        const auto* members = memberNode->as_array();
+        if (members == nullptr) {
+          diag.error(groupPath + ".member", "must be an array of tables ([[wallpaper.link.<group>.member]])");
+          continue;
+        }
+        std::size_t index = 0;
+        for (const auto& memberNodeItem : *members) {
+          const std::string memberPath = groupPath + ".member[" + std::to_string(index) + "]";
+          ++index;
+          const auto* member = memberNodeItem.as_table();
+          if (member == nullptr) {
+            diag.error(memberPath, "must be a table");
+            continue;
+          }
+          const auto monitor = (*member)["monitor"].value<std::string>();
+          if (!monitor.has_value() || monitor->empty()) {
+            diag.error(memberPath + ".monitor", "is required");
+            continue;
+          }
+          const auto [it, inserted] = monitorOwner.emplace(*monitor, std::string(groupKey.str()));
+          if (!inserted) {
+            diag.error(
+                memberPath + ".monitor",
+                "monitor \"" + *monitor + "\" already belongs to link group \"" + it->second + "\""
+            );
+          }
+          if (const auto* dir = member->get("directory"); dir == nullptr) {
+            diag.error(memberPath + ".directory", "is required");
+          } else if (!dir->is_string()) {
+            diag.error(memberPath + ".directory", "must be a string");
+          }
+        }
+      }
+    }
+
     void appendMergedConfigDiagnostics(const toml::table& merged, schema::Diagnostics& diag) {
       for (const schema::SectionSpec& spec : schema::sections()) {
         checkSection(merged, spec, diag);
       }
       validateCalendarSyntax(merged, diag);
       validateLauncherProviders(merged, diag);
+      validateWallpaperLinks(merged, diag);
 
       // Resolve the candidate's plugin catalog without mutating the live registry.
       scripting::PluginRegistry pluginRegistry;
