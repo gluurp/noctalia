@@ -1631,6 +1631,16 @@ void Application::initBrightnessAndPipewire() {
     );
     m_soundPlayer = std::make_shared<SoundPlayer>();
 
+    auto applySpectrumConfig = [this] {
+      if (m_pipewireSpectrum == nullptr) {
+        return;
+      }
+      const auto& audio = m_configService.config().audio;
+      m_pipewireSpectrum->setTargetNodeName(audio.visualizerTarget);
+      m_pipewireSpectrum->setFrameRate(audio.spectrumFrameRate);
+    };
+    applySpectrumConfig();
+
     auto applySoundConfig = [this] {
       if (m_soundPlayer == nullptr) {
         return;
@@ -1648,28 +1658,13 @@ void Application::initBrightnessAndPipewire() {
     };
     applySoundConfig();
     m_configService.addReloadCallback(
-        [this, applySoundConfig] {
+        [this, applySoundConfig, applySpectrumConfig]() {
           if (m_configService.lastChange().audio) {
             applySoundConfig();
-          }
-        },
-        "sound"
-    );
-
-    auto applySpectrumConfig = [this] {
-      if (m_pipewireSpectrum == nullptr) {
-        return;
-      }
-      m_pipewireSpectrum->setFrameRate(m_configService.config().audio.spectrumFrameRate);
-    };
-    applySpectrumConfig();
-    m_configService.addReloadCallback(
-        [this, applySpectrumConfig] {
-          if (m_configService.lastChange().audio) {
             applySpectrumConfig();
           }
         },
-        "spectrum"
+        "sound"
     );
   } catch (const std::exception& e) {
     kLog.warn("pipewire disabled: {}", e.what());

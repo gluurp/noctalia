@@ -1,3 +1,4 @@
+#include "config/config_service.h"
 #include "cursor-shape-v1-client-protocol.h"
 #include "i18n/i18n.h"
 #include "render/core/render_styles.h"
@@ -867,7 +868,16 @@ namespace {
 } // namespace
 
 void DesktopWidgetsEditor::applySettingChange(const std::string& key, WidgetSettingValue value) {
-  deferEditorMutation([this, key, value = std::move(value)] {
+  // The spectrum source is shared by every visualizer, so the inspector row writes
+  // the global config override instead of this widget's settings.
+  if (key == desktop_settings::kVisualizerTargetSettingKey) {
+    if (const auto* source = std::get_if<std::string>(&value); source != nullptr && m_config != nullptr) {
+      (void)m_config->setOverride({"audio", "visualizer_target"}, *source);
+    }
+    return;
+  }
+
+  deferEditorMutation([this, key, value = std::move(value)]() {
     auto* state = findWidgetState(m_selectedWidgetId);
     if (state == nullptr) {
       return;
@@ -1060,12 +1070,21 @@ void DesktopWidgetsEditor::buildInspector(
 
   const auto typeSpecs = desktop_settings::desktopWidgetSettingSpecs(selectedState.type);
   const auto backgroundSpecs = desktop_settings::commonDesktopWidgetSettingSpecs(selectedState.type);
+
+  // Show the live global capture source for spectrum widgets; it is not stored in
+  // the widget's own settings map (applySettingChange writes the config override).
+  Settings inspectorSettings = selectedState.settings;
+  if (selectedState.type == "audio_visualizer" || selectedState.type == "fancy_audio_visualizer") {
+    inspectorSettings[std::string(desktop_settings::kVisualizerTargetSettingKey)] =
+        m_config != nullptr ? m_config->config().audio.visualizerTarget : std::string{};
+  }
+
   addSettingsSection(
-      *content, typeSpecs, selectedState.settings, this, "desktop-widgets.editor.settings.widget-section", false
+      *content, typeSpecs, inspectorSettings, this, "desktop-widgets.editor.settings.widget-section", false
   );
-  addBackgroundSection(*content, selectedState.settings, this, selectedState.type);
-  if (hasVisibleSpecs(typeSpecs, selectedState.settings) || hasVisibleSpecs(backgroundSpecs, selectedState.settings)) {
-    content->addChild(makeResetDefaultsRow(this, [this] { resetSelectedWidgetSettings(); }));
+  addBackgroundSection(*content, inspectorSettings, this, selectedState.type);
+  if (hasVisibleSpecs(typeSpecs, inspectorSettings) || hasVisibleSpecs(backgroundSpecs, inspectorSettings)) {
+    content->addChild(makeResetDefaultsRow(this, [this]() { resetSelectedWidgetSettings(); }));
   }
 
   Flex* panelPtr = nullptr;

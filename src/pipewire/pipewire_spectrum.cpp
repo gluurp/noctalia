@@ -19,6 +19,7 @@
 #include <spa/pod/builder.h>
 #include <spa/pod/pod.h>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace {
@@ -124,8 +125,9 @@ void PipeWireSpectrum::removeChangeListener(ListenerId id) {
 
 class PipeWireSpectrum::Stream {
 public:
-  Stream(PipeWireSpectrum& spectrum, std::uint32_t nodeId, std::string targetObject)
-      : m_spectrum(spectrum), m_nodeId(nodeId), m_targetObject(std::move(targetObject)) {}
+  Stream(PipeWireSpectrum& spectrum, std::uint32_t nodeId, std::string targetObject, bool captureSink)
+      : m_spectrum(spectrum), m_nodeId(nodeId), m_targetObject(std::move(targetObject)),
+        m_captureSink(captureSink) {}
   ~Stream() { destroy(); }
 
   Stream(const Stream&) = delete;
@@ -148,6 +150,7 @@ private:
   PipeWireSpectrum& m_spectrum;
   std::uint32_t m_nodeId = 0;
   std::string m_targetObject;
+  bool m_captureSink = true;
   pw_stream* m_stream = nullptr;
   spa_hook m_listener{};
   spa_audio_info_raw m_format{.format = SPA_AUDIO_FORMAT_UNKNOWN};
@@ -172,12 +175,17 @@ bool PipeWireSpectrum::Stream::start() {
 
   const char* const passiveMode = m_spectrum.m_service.serverSupportsPassiveFollow() ? "in-follow" : "true";
 
+  // A sink is captured through its monitor; a source is captured directly.
   auto* props = pw_properties_new(
       PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_NAME, "Noctalia Spectrum",
-      PW_KEY_APP_NAME, "Noctalia Spectrum", PW_KEY_STREAM_MONITOR, "true", PW_KEY_STREAM_CAPTURE_SINK, "true",
+      PW_KEY_APP_NAME, "Noctalia Spectrum",
       // No media.role: WirePlumber restore-stream keys on media.role first, sharing volume across Music-role captures.
       PW_KEY_TARGET_OBJECT, m_targetObject.c_str(), PW_KEY_NODE_PASSIVE, passiveMode, nullptr
   );
+  if (props != nullptr && m_captureSink) {
+    pw_properties_set(props, PW_KEY_STREAM_MONITOR, "true");
+    pw_properties_set(props, PW_KEY_STREAM_CAPTURE_SINK, "true");
+  }
   if (props == nullptr) {
     kLog.warn("failed to create spectrum stream properties");
     return false;
@@ -367,6 +375,32 @@ void PipeWireSpectrum::setTargetNodeId(std::uint32_t id) {
   rebuildStream();
 }
 
+void PipeWireSpectrum::setTargetNodeName(std::string name) {
+  constexpr std::string_view kMonitorSuffix = ".monitor";
+  if (name.ends_with(kMonitorSuffix)) {
+    name.resize(name.size() - kMonitorSuffix.size());
+  }
+  if (name.empty() || name == "default") {
+    name.clear();
+  }
+  if (name == m_targetNodeName) {
+    return;
+  }
+  m_targetNodeName = std::move(name);
+  rebuildStream();
+}
+
+const AudioNode* PipeWireSpectrum::findNodeByName(std::string_view name) const noexcept {
+  const auto& state = m_service.state();
+  for (const auto* nodes : {&state.sinks, &state.sources}) {
+    auto it = std::ranges::find_if(*nodes, [name](const AudioNode& node) { return node.name == name; });
+    if (it != nodes->end()) {
+      return &*it;
+    }
+  }
+  return nullptr;
+}
+
 void PipeWireSpectrum::setLowerCutoff(int freq) {
   freq = std::max(1, freq);
   if (freq == m_lowerCutoff) {
@@ -474,7 +508,9 @@ void PipeWireSpectrum::rebuildStream() {
     return;
   }
 
-  m_stream = std::make_unique<Stream>(*this, target, targetNode->name);
+  const auto& state = m_service.state();
+  const bool captureSink = std::ranges::find(state.sinks, target, &AudioNode::id) != state.sinks.end();
+  m_stream = std::make_unique<Stream>(*this, target, targetNode->name, captureSink);
   if (!m_stream->start()) {
     m_stream.reset();
     return;
@@ -500,10 +536,24 @@ std::uint32_t PipeWireSpectrum::resolvedTargetNodeId() const noexcept {
   if (m_targetNodeId != 0) {
     return m_targetNodeId;
   }
+  if (!m_targetNodeName.empty()) {
+    if (const auto* node = findNodeByName(m_targetNodeName); node != nullptr) {
+      return node->id;
+    }
+  }
   return m_service.state().defaultSinkId;
 }
 
 const AudioNode* PipeWireSpectrum::resolvedTargetNode() const noexcept {
+  if (!m_targetNodeName.empty()) {
+    if (const auto* node = findNodeByName(m_targetNodeName); node != nullptr) {
+      return node;
+    }
+    // The configured node is gone (application closed, device unplugged).
+    // Fall back to the default sink so the visualizer keeps working.
+    kLog.warn("spectrum target '{}' not found; falling back to the default sink", m_targetNodeName);
+  }
+
   const std::uint32_t id = resolvedTargetNodeId();
   if (id == 0) {
     return nullptr;
@@ -648,6 +698,29 @@ void PipeWireSpectrum::computeAnalysisBandBins() {
     m_analysisBandBins[i] =
         std::clamp(freq * static_cast<float>(kFftSize) / sampleRate, 1.0F, static_cast<float>(fftBins));
   }
+
+  // Bands are log-spaced, so each covers a frequency span whose FFT-bin count
+  // grows with frequency. Summing the power of every bin in the span (instead of
+  // reading the magnitude at the band centre) makes the display flat for
+  // pink-ish music and keeps a loud bass region from crushing the rest.
+  m_analysisBandLowBins.resize(analysisBandCountSize);
+  m_analysisBandHighBins.resize(analysisBandCountSize);
+  for (std::size_t i = 0; i < analysisBandCountSize; ++i) {
+    const float previous = i == 0 ? m_analysisBandBins[i] : m_analysisBandBins[i - 1];
+    const float next = i + 1 < analysisBandCountSize ? m_analysisBandBins[i + 1] : m_analysisBandBins[i];
+    int low = static_cast<int>(std::floor((previous + m_analysisBandBins[i]) * 0.5F));
+    int high = static_cast<int>(std::ceil((m_analysisBandBins[i] + next) * 0.5F));
+    if (i == 0) {
+      low = 1;
+    }
+    if (i + 1 == analysisBandCountSize) {
+      high = fftBins;
+    }
+    low = std::clamp(low, 1, fftBins);
+    high = std::clamp(high, low, fftBins);
+    m_analysisBandLowBins[i] = low;
+    m_analysisBandHighBins[i] = high;
+  }
 }
 
 bool PipeWireSpectrum::processListenerView(ListenerState& state, float nrFactor, double gravityMod) {
@@ -771,13 +844,14 @@ void PipeWireSpectrum::processFrame() {
   auto& bands = m_analysisBands;
   const auto analysisBandCountSize = static_cast<std::size_t>(m_analysisBandCount);
   for (std::size_t i = 0; i < analysisBandCountSize; ++i) {
-    const float sampleBin = i < m_analysisBandBins.size() ? m_analysisBandBins[i] : 1.0F;
-    const int binLow = std::clamp(static_cast<int>(std::floor(sampleBin)), 1, kFftSize / 2);
-    const int binHigh = std::clamp(binLow + 1, binLow, kFftSize / 2);
-    const float t = std::clamp(sampleBin - static_cast<float>(binLow), 0.0F, 1.0F);
-    const float low = std::abs(m_fftBuf[static_cast<std::size_t>(binLow)]);
-    const float high = std::abs(m_fftBuf[static_cast<std::size_t>(binHigh)]);
-    bands[i] = low + (high - low) * t;
+    const int binLow = i < m_analysisBandLowBins.size() ? m_analysisBandLowBins[i] : 1;
+    const int binHigh = i < m_analysisBandHighBins.size() ? m_analysisBandHighBins[i] : binLow;
+    double power = 0.0;
+    for (int bin = binLow; bin <= binHigh; ++bin) {
+      const float magnitude = std::abs(m_fftBuf[static_cast<std::size_t>(bin)]);
+      power += static_cast<double>(magnitude) * magnitude;
+    }
+    bands[i] = static_cast<float>(std::sqrt(power));
   }
 
   const float nrFactor = m_noiseReduction;

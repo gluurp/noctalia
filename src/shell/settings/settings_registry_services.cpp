@@ -220,6 +220,11 @@ namespace settings::registry {
           ? SettingVisibility{[prev = std::move(prev)](const Config& c) { return c.audio.enableSounds && prev(c); }}
           : SettingVisibility{[](const Config& c) { return c.audio.enableSounds; }};
     }
+    entries.push_back(makeEntry(
+        SettingsSection::Services, "audio", tr("settings.schema.services.visualizer-target.label"),
+        tr("settings.schema.services.visualizer-target.description"), {"audio", "visualizer_target"},
+        TextSetting{.value = cfg.audio.visualizerTarget, .placeholder = "default sink"}, "spectrum visualizer"
+    ));
     {
       // A rate set in TOML that is not a preset gets its own option instead of showing as unknown.
       std::vector<int> frameRates{30, 60, 100, 120, 144, 165, 240};

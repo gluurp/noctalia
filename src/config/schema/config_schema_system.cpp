@@ -28,7 +28,8 @@ namespace noctalia::config::schema {
         field(&AudioConfig::enableScreenshotSounds, "enable_screenshot_sounds"),
         field(&AudioConfig::soundVolume, "sound_volume", kUnitRange),
         field(&AudioConfig::soundTheme, "sound_theme"),
-        field(&AudioConfig::spectrumFrameRate, "spectrum_frame_rate", kSpectrumFrameRateRange)
+        field(&AudioConfig::spectrumFrameRate, "spectrum_frame_rate", kSpectrumFrameRateRange),
+        field(&AudioConfig::visualizerTarget, "visualizer_target")
     };
     return s;
   }

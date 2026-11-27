@@ -13,6 +13,11 @@ namespace scripting {
 
 namespace desktop_settings {
 
+  // Inspector row for the shared spectrum capture source. It maps to the global
+  // `[audio] visualizer_target` config key, not to a per-widget setting: every
+  // visualizer reads the same PipeWireSpectrum stream.
+  inline constexpr std::string_view kVisualizerTargetSettingKey = "visualizer_target";
+
   enum class DesktopWidgetSettingsScope {
     Widget,
     Background,

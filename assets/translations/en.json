@@ -743,6 +743,7 @@
         "visualization-mode-rings": "Rings",
         "visualization-mode-wave": "Wave",
         "visualization-mode-wave-rings": "Wave + Rings",
+        "visualizer-target": "Source (all visualizers)",
         "wave-thickness": "Wave Thickness",
         "widget-section": "Widget"
       },
@@ -3356,6 +3357,10 @@
             "description": "Activity threshold (left) and critical threshold (right)",
             "label": "{stat}"
           }
+        },
+        "visualizer-target": {
+          "description": "PipeWire node name the audio visualizers analyse. Empty uses the default sink. A sink is captured through its monitor (e.g. easyeffects_sink shows the audio entering Easy Effects, before its effects); a source is captured directly.",
+          "label": "Visualizer Source"
         },
         "volume-change-sound": {
           "description": "Sound file used for volume feedback",

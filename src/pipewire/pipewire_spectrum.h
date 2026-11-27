@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -28,6 +29,13 @@ public:
 
   void setTargetNodeId(std::uint32_t id);
   std::uint32_t targetNodeId() const noexcept { return m_targetNodeId; }
+
+  // Capture a specific node instead of the default sink. `name` is a PipeWire
+  // node.name (e.g. "easyeffects_sink"); a trailing ".monitor" is ignored, so a
+  // pactl-style monitor source name also works. Empty restores the default sink.
+  // Sinks are captured through their monitor, sources directly.
+  void setTargetNodeName(std::string name);
+  [[nodiscard]] const std::string& targetNodeName() const noexcept { return m_targetNodeName; }
 
   void setLowerCutoff(int freq);
   int lowerCutoff() const noexcept { return m_lowerCutoff; }
@@ -69,8 +77,9 @@ private:
 
   bool hasListeners() const noexcept { return !m_listeners.empty(); }
   void rebuildStream();
-  std::uint32_t resolvedTargetNodeId() const noexcept;
-  const AudioNode* resolvedTargetNode() const noexcept;
+  [[nodiscard]] std::uint32_t resolvedTargetNodeId() const noexcept;
+  [[nodiscard]] const AudioNode* resolvedTargetNode() const noexcept;
+  [[nodiscard]] const AudioNode* findNodeByName(std::string_view name) const noexcept;
   void clearValues(bool notify);
   void emitChanged(ListenerId id);
 
@@ -90,6 +99,7 @@ private:
   ListenerId m_nextListenerId = 1;
 
   std::uint32_t m_targetNodeId = 0;
+  std::string m_targetNodeName;
   std::uint32_t m_boundNodeId = 0;
   std::string m_boundTargetObject;
   int m_analysisBandCount = 32;
@@ -123,6 +133,8 @@ private:
 
   std::vector<float> m_window;
   std::vector<float> m_analysisBandBins;
+  std::vector<int> m_analysisBandLowBins;
+  std::vector<int> m_analysisBandHighBins;
   float m_sensitivity = 1.0F;
   bool m_sensInit = true;
   std::vector<std::complex<float>> m_fftBuf;

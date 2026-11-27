@@ -1561,6 +1561,10 @@ struct AudioConfig {
   float soundVolume = 0.5F;
   std::string soundTheme = "freedesktop";
   std::int32_t spectrumFrameRate = 60;
+  // PipeWire node.name the audio visualizers analyse. Empty = default sink.
+  // A sink is captured through its monitor (e.g. "easyeffects_sink" shows the
+  // audio entering Easy Effects, before its effects); a source is captured directly.
+  std::string visualizerTarget;
 
   bool operator==(const AudioConfig&) const = default;
 };

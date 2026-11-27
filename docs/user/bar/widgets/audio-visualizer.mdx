@@ -5,7 +5,11 @@ sidebar:
   order: 2
 ---
 
-Horizontal audio spectrum using the current PipeWire monitor stream.
+Horizontal audio spectrum using a PipeWire monitor stream. By default the
+default sink is analysed; set `audio.visualizer_target` to a PipeWire
+`node.name` to analyse a different node (e.g. `easyeffects_sink` to see the
+audio entering Easy Effects, before its effects, or a source name to capture
+that source directly).
 
 | Setting          | Type   | Default     | Description                                                                                                 |
 | ---------------- | ------ | ----------- | ----------------------------------------------------------------------------------------------------------- |

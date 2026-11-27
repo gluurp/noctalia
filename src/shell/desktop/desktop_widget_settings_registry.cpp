@@ -279,6 +279,7 @@ namespace desktop_settings {
       showSeconds.visibleWhen = analogOnly;
       add(std::move(showSeconds));
     } else if (type == "audio_visualizer") {
+      add(stringSpec(kVisualizerTargetSettingKey, ""));
       auto bands = intSpec("bands", 32, 4.0, 128.0, 4.0);
       bands.visibleWhen = WidgetSettingVisibility{"show_wave", {"false"}};
       add(std::move(bands));
@@ -292,6 +293,7 @@ namespace desktop_settings {
       add(colorSpec("color_1", "primary"));
       add(colorSpec("color_2", "primary"));
     } else if (type == "fancy_audio_visualizer") {
+      add(stringSpec(kVisualizerTargetSettingKey, ""));
       const WidgetSettingVisibility barsVisible{"visualization_mode", {"bars", "bars_rings", "all"}};
       const WidgetSettingVisibility waveVisible{"visualization_mode", {"wave", "wave_rings", "all"}};
       const WidgetSettingVisibility ringsVisible{"visualization_mode", {"rings", "bars_rings", "wave_rings", "all"}};
