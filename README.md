@@ -1,7 +1,7 @@
 # noctalia (local fork)
 
 Fork of [noctalia-dev/noctalia](https://github.com/noctalia-dev/noctalia), MIT
-licensed. The `local` branch is based on v5.6.0 and adds four changes:
+licensed. The `local` branch is based on v5.6.0 and adds five changes:
 
 1. **Audio stream descriptors**: the Application Volumes panel shows where each
    stream comes from and which sink it plays to, alongside the app name.
@@ -15,6 +15,23 @@ licensed. The `local` branch is based on v5.6.0 and adds four changes:
    Smart auto-hide treats an open scratchpad/special workspace as visible
    content, per output; `smart_auto_hide_workspaces` can restrict this to named
    special workspaces such as `special:special` or `special:scratchpad`.
+5. **Linked wallpapers and per-wallpaper colors**: link monitor folders whose
+   files share exact relative paths, browse each set as one synthetic folder,
+   apply all matching monitor files in one write, optionally hide the original
+   member folders (including parent folders and symlinked originals), clean
+   stale wallpaper references, use bookmarks instead of favorite color
+   snapshots, and override colors globally, per linked set, or per wallpaper.
+   Applying from a symlinked original still resolves the linked set. Missing
+   targets leave the other monitors untouched and raise a notification.
+   Settings rejects duplicate monitor members. The panel has a visible
+   Back · folder button (Escape also goes up one level), a check badge on the
+   selected/current wallpaper that stays visible on dark thumbnails, and a
+   Global scope button that removes every override affecting the image. A
+   per-image override applies even inside a linked set. Settings > Wallpaper >
+   Colors for each wallpaper edits the active wallpaper or a saved
+   `[[wallpaper.entry]]`; entries are independent of favorites. The original
+   Super+Shift+W menu controls stay in place, with one added
+   **Colors for this wallpaper…** button. Saved palettes are Custom snapshots.
 
 Machine config and detailed notes live in
 [gluurp/software/noctalia](https://github.com/gluurp/software/tree/main/noctalia).
@@ -54,13 +71,13 @@ The module API, package name and options are upstream's; the module's
 `programs.noctalia.package` already defaults to this flake's package, so the
 only difference is the patched source.
 
-If you would rather keep upstream's flake untouched and apply the four changes
+If you would rather keep upstream's flake untouched and apply the five changes
 as patches, pin it to the tag they target and override the package:
 
 ```nix
 inputs.noctalia.url = "github:noctalia-dev/noctalia/v5.6.0";
 
-# copy the four patches from gluurp/software/noctalia/patches next to this file
+# copy the five patches from gluurp/software/noctalia/patches next to this file
 programs.noctalia.package =
   inputs.noctalia.packages.${pkgs.system}.default.overrideAttrs (old: {
     patches = (old.patches or []) ++ [
@@ -68,6 +85,7 @@ programs.noctalia.package =
       ./patches/0002-spectrum-visualizer.patch
       ./patches/0003-transparent-sysmon-graph-background.patch
       ./patches/0004-super-reveal.patch
+      ./patches/0005-wallpaper-features.patch
     ];
   });
 ```
