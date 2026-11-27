@@ -37,6 +37,45 @@ Then restart the shell:
 systemctl --user restart noctalia-shell.service
 ```
 
+## NixOS and Home Manager
+
+The flake here is upstream's flake; only the source on `local` differs. Use it
+in place of the upstream input and import the normal module:
+
+```nix
+inputs.noctalia.url = "github:gluurp/noctalia?ref=local";
+
+# then, as before:
+# imports = [ inputs.noctalia.nixosModules.default ];
+# or home-manager: imports = [ inputs.noctalia.homeModules.default ];
+```
+
+The module API, package name and options are upstream's; the module's
+`programs.noctalia.package` already defaults to this flake's package, so the
+only difference is the patched source.
+
+If you would rather keep upstream's flake untouched and apply the four changes
+as patches, pin it to the tag they target and override the package:
+
+```nix
+inputs.noctalia.url = "github:noctalia-dev/noctalia/v5.6.0";
+
+# copy the four patches from gluurp/software/noctalia/patches next to this file
+programs.noctalia.package =
+  inputs.noctalia.packages.${pkgs.system}.default.overrideAttrs (old: {
+    patches = (old.patches or []) ++ [
+      ./patches/0001-audio-stream-descriptors.patch
+      ./patches/0002-spectrum-visualizer.patch
+      ./patches/0003-transparent-sysmon-graph-background.patch
+      ./patches/0004-super-reveal.patch
+    ];
+  });
+```
+
+Nix reuses the upstream dependencies and rebuilds only Noctalia. The patches
+must match the pinned tag, exactly as with `build-patched.sh`. A compiled
+Noctalia binary cannot be patched in place.
+
 ## Update
 
 ```sh
