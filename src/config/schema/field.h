@@ -320,6 +320,31 @@ namespace noctalia::config::schema {
     };
   }
 
+  template <typename Struct>
+  Field<Struct>
+  optionalStringArrayField(std::optional<std::vector<std::string>> Struct::* member, std::string_view key) {
+    return Field<Struct>{
+        key,
+        [member, key](const toml::table& tbl, Struct& out, std::string_view parentPath, Diagnostics& diag) {
+          if (const auto* arr = tbl[key].as_array()) {
+            out.*member = readStringArray(*arr, joinPath(parentPath, key), diag);
+          } else if (tbl[key]) {
+            warnWrongType(tbl, key, parentPath, diag, "an array of strings");
+          }
+        },
+        [member, key](toml::table& tbl, const Struct& in) {
+          if (!(in.*member)) {
+            return;
+          }
+          toml::array arr;
+          for (const auto& value : *(in.*member)) {
+            arr.push_back(value);
+          }
+          tbl.insert_or_assign(key, std::move(arr));
+        },
+    };
+  }
+
   // A sub-table of free-form string keys to string values (e.g. `[bar.<name>.actions]`). Keys are
   // not part of the schema, so no unknown-key detection applies; the consumer validates them.
   template <typename Struct>

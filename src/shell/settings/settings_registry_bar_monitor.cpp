@@ -86,12 +86,85 @@ namespace settings::registry {
         };
         {
           auto e = makeEntry(
+              section, "general", tr("settings.schema.bar.animation-duration.label"),
+              tr("settings.schema.bar.animation-duration.description"), monitorPath("animation_duration_ms"),
+              StepperSetting{
+                  .value = ovr.animationDurationMs.value_or(bar.animationDurationMs),
+                  .minValue = static_cast<int>(noctalia::config::schema::kBarAnimationDurationMsRange.min.value()),
+                  .maxValue = static_cast<int>(noctalia::config::schema::kBarAnimationDurationMsRange.max.value()),
+                  .step = static_cast<int>(noctalia::config::schema::kBarAnimationDurationMsRange.step.value()),
+                  .valueSuffix = "ms",
+              },
+              "autohide animation speed duration slide fade"
+          );
+          e.visibleWhen = monitorAutoHideOn;
+          entries.push_back(std::move(e));
+        }
+        {
+          auto e = makeEntry(
               section, "general", tr("settings.schema.bar.show-on-workspace-switch.label"),
               tr("settings.schema.bar.show-on-workspace-switch.description"), monitorPath("show_on_workspace_switch"),
               ToggleSetting{ovr.showOnWorkspaceSwitch.value_or(bar.showOnWorkspaceSwitch)},
               "workspace reveal peek autohide"
           );
           e.visibleWhen = monitorAutoHideOn;
+          entries.push_back(std::move(e));
+        }
+        {
+          auto e = makeEntry(
+              section, "general", tr("settings.schema.bar.reveal-on-super.label"),
+              tr("settings.schema.bar.reveal-on-super.description"), monitorPath("reveal_on_super"),
+              enumSelect(kBarSuperReveals, ovr.revealOnSuper.value_or(bar.revealOnSuper)), "super key hold reveal"
+          );
+          e.visibleWhen = monitorAutoHideOn;
+          entries.push_back(std::move(e));
+        }
+        {
+          auto e = makeEntry(
+              section, "general", tr("settings.schema.bar.reveal-on-super-delay.label"),
+              tr("settings.schema.bar.reveal-on-super-delay.description"), monitorPath("reveal_on_super_delay_ms"),
+              StepperSetting{
+                  .value = ovr.revealOnSuperDelayMs.value_or(bar.revealOnSuperDelayMs),
+                  .minValue = static_cast<int>(noctalia::config::schema::kBarRevealOnSuperDelayMsRange.min.value()),
+                  .maxValue = static_cast<int>(noctalia::config::schema::kBarRevealOnSuperDelayMsRange.max.value()),
+                  .step = static_cast<int>(noctalia::config::schema::kBarRevealOnSuperDelayMsRange.step.value()),
+                  .valueSuffix = "ms",
+              },
+              "super hold delay"
+          );
+          e.visibleWhen = [barName = bar.name, match = ovr.match](const Config& c) {
+            const BarConfig* b = findBar(c, barName);
+            if (b == nullptr) {
+              return false;
+            }
+            const BarMonitorOverride* o = findMonitorOverride(*b, match);
+            const BarSuperReveal reveal = o != nullptr ? o->revealOnSuper.value_or(b->revealOnSuper) : b->revealOnSuper;
+            const bool autoHide = o != nullptr ? o->isAutoHideEnabled(b->autoHide, b->smartAutoHide) : b->isAutoHideEnabled();
+            return autoHide && reveal != BarSuperReveal::Off;
+          };
+          entries.push_back(std::move(e));
+        }
+        entries.push_back(makeEntry(
+            section, "general", tr("settings.schema.bar.edge-reveal.label"),
+            tr("settings.schema.bar.edge-reveal.description"), monitorPath("edge_reveal"),
+            ToggleSetting{ovr.edgeReveal.value_or(bar.edgeReveal)}, "edge pointer reveal"
+        ));
+        {
+          auto e = makeEntry(
+              section, "general", tr("settings.schema.bar.smart-auto-hide-workspaces.label"),
+              tr("settings.schema.bar.smart-auto-hide-workspaces.description"),
+              monitorPath("smart_auto_hide_workspaces"),
+              ListSetting{.items = ovr.smartAutoHideWorkspaces.value_or(bar.smartAutoHideWorkspaces)},
+              "smart auto hide overlay special workspace"
+          );
+          e.visibleWhen = [barName = bar.name, match = ovr.match](const Config& c) {
+            const BarConfig* b = findBar(c, barName);
+            if (b == nullptr) {
+              return false;
+            }
+            const BarMonitorOverride* o = findMonitorOverride(*b, match);
+            return o != nullptr ? o->smartAutoHide.value_or(b->smartAutoHide) : b->smartAutoHide;
+          };
           entries.push_back(std::move(e));
         }
         entries.push_back(makeEntry(

@@ -2089,6 +2089,10 @@
           "description": "Wait this many milliseconds after the pointer leaves before hiding the bar; 0 hides immediately (On mode only)",
           "label": "Auto-Hide Delay"
         },
+        "animation-duration": {
+          "description": "How long the slide/fade takes when the bar hides or reveals; 0 makes it instant",
+          "label": "Show/Hide Animation Speed"
+        },
         "auto-hide-reserve-space": {
           "description": "With auto-hide or smart auto-hide, reserve layout only while the bar is visible so hidden windows use the full screen",
           "label": "Reserve Space While Visible"
@@ -2233,6 +2237,25 @@
         "show-on-workspace-switch": {
           "description": "Briefly reveal the bar when the active workspace changes",
           "label": "Show on Workspace Switch"
+        },
+        "reveal-on-super": {
+          "description": "Show this auto-hidden bar while Super is held: focused reveals only the keyboard-focused monitor, all reveals every enabled bar. Has no effect when auto-hide is off.",
+          "label": "Reveal on Super",
+          "option-all": "All monitors",
+          "option-focused": "Focused monitor",
+          "option-off": "Off"
+        },
+        "reveal-on-super-delay": {
+          "description": "Wait this long after Super is pressed before revealing the bar, so quick shortcuts do not flash it",
+          "label": "Reveal Delay"
+        },
+        "edge-reveal": {
+          "description": "Reveal a hidden bar when the pointer reaches its screen edge",
+          "label": "Edge Reveal"
+        },
+        "smart-auto-hide-workspaces": {
+          "description": "Extra workspace keys counted as visible content for smart auto-hide; leave empty to count every open special workspace. Use full keys such as special:special or special:scratchpad",
+          "label": "Smart Auto-Hide Workspaces"
         },
         "show-tooltip": {
           "description": "Show hover tooltips for widgets on this bar; a widget's own Show Tooltip setting overrides this",

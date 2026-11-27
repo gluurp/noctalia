@@ -80,6 +80,7 @@ namespace noctalia::cli {
                                                                             "logout",  "reboot",  "reboot-uefi",
                                                                             "shutdown"};
   inline constexpr std::array<std::string_view, 2> kMsgTaskbarCycleDirectionChoices{"next", "prev"};
+  inline constexpr std::array<std::string_view, 2> kMsgBarSuperHoldStateChoices{"on", "off"};
   inline constexpr std::array<std::string_view, 3> kMsgThemeModeSetModeChoices{"dark", "light", "auto"};
   inline constexpr std::array<std::string_view, 2> kMsgWorkspaceSwitchDirectionChoices{"next", "prev"};
 
@@ -107,6 +108,9 @@ namespace noctalia::cli {
   inline constexpr std::array kMsgBarShowPositionals{
       Positional{"bar-name", {}, {}, false, false, false},
       Positional{"monitor-selector", {}, {}, false, false, false},
+  };
+  inline constexpr std::array kMsgBarSuperHoldPositionals{
+      Positional{"state", {}, kMsgBarSuperHoldStateChoices, true, false, false},
   };
   inline constexpr std::array kMsgBarTogglePositionals{
       Positional{"bar-name", {}, {}, false, false, false},
@@ -377,6 +381,9 @@ namespace noctalia::cli {
         false
     };
     inline constexpr Command barShow{"bar-show", "Show one or all bars", {}, {}, {}, kMsgBarShowPositionals, {}, false};
+    inline constexpr Command barSuperHold{
+        "bar-super-hold", "Reveal bars while Super is held", {}, {}, {}, kMsgBarSuperHoldPositionals, {}, false
+    };
     inline constexpr Command barToggle{
         "bar-toggle", "Toggle visibility for one or all bars", {}, {}, {}, kMsgBarTogglePositionals, {}, false
     };
@@ -939,6 +946,7 @@ namespace noctalia::cli {
       msg::barLayerSet,
       msg::barReserveToggle,
       msg::barShow,
+      msg::barSuperHold,
       msg::barToggle,
       msg::bluetoothDisable,
       msg::bluetoothEnable,

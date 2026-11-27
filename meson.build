@@ -865,6 +865,7 @@ _noctalia_sources = files(
   'src/system/brightness_service.cpp',
   'src/system/keyboard_backlight_service.cpp',
   'src/system/lock_keys_service.cpp',
+  'src/system/super_key_watcher.cpp',
   'src/system/distro_info.cpp',
   'src/system/disk_mounts.cpp',
   'src/system/format_units.cpp',

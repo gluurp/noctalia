@@ -90,6 +90,9 @@ namespace {
     if (fullSurface) {
       return {InputRect{0, 0, surfW, surfH}};
     }
+    if (!cfg.edgeReveal) {
+      return {};
+    }
 
     const int strip = std::min(kAutoHideTriggerPx, cfg.position == "left" || cfg.position == "right" ? surfW : surfH);
     if (cfg.position == "bottom") {
@@ -1715,6 +1718,18 @@ void Bar::onWorkspaceChanged() {
     return;
   }
 
+  // A workspace change that happens during a Super hold (the scroll) must not
+  // cancel the post-release dismissal. Only a later change re-enables the
+  // normal smart-auto-hide and workspace-peek reveals.
+  const auto now = std::chrono::steady_clock::now();
+  for (const auto& instanceUp : m_instances) {
+    BarInstance* instance = instanceUp.get();
+    if (instance != nullptr && !instance->superHeld && instance->superDismissed
+        && now - instance->superDismissedAt > std::chrono::milliseconds(300)) {
+      instance->superDismissed = false;
+    }
+  }
+
   bool anyChanged = false;
   for (const auto& output : m_platform->outputs()) {
     const std::string activeId = activeWorkspaceId(m_platform->workspaces(output.output));
@@ -1761,7 +1776,18 @@ void Bar::reevaluateSmartAutoHide() {
       continue;
     }
 
-    const bool wantsPinned = shell::smart_auto_hide::smartWantsPinnedVisible(*m_platform, instance->output);
+    const bool wantsPinned = shell::smart_auto_hide::smartWantsPinnedVisible(
+        *m_platform, instance->output, instance->barConfig.smartAutoHideWorkspaces
+    );
+    if (instance->superDismissed) {
+      const bool graceElapsed = std::chrono::steady_clock::now() - instance->superDismissedAt
+          > std::chrono::milliseconds(300);
+      if (!wantsPinned || !graceElapsed) {
+        instance->smartAutoHidePinnedVisible = false;
+        continue;
+      }
+      instance->superDismissed = false;
+    }
     const bool pinnedChanged = wantsPinned != instance->smartAutoHidePinnedVisible;
     instance->smartAutoHidePinnedVisible = wantsPinned;
 
@@ -1778,6 +1804,7 @@ void Bar::reevaluateSmartAutoHide() {
       }
     } else if (
         !instance->pointerInside
+        && !instance->superHeld
         && instance->attachedPopupCount == 0
         && !suppressAutoHide
         && (instance->hideOpacity > 0.0F || pinnedChanged)
@@ -1812,6 +1839,8 @@ void Bar::applyPendingWorkspaceReveal() {
       auto* instance = instanceUp.get();
       if (instance == nullptr
           || instance->outputName != outputName
+          || instance->superHeld
+          || instance->superDismissed
           || !instance->barConfig.enabled
           || !instance->barConfig.isAutoHideEnabled()
           || !instance->barConfig.showOnWorkspaceSwitch
@@ -1837,7 +1866,8 @@ void Bar::applyPendingWorkspaceReveal() {
 
   m_workspacePeekHideTimer.start(kWorkspacePeekHold, [this, peeked = std::move(peeked)] {
     for (BarInstance* instance : peeked) {
-      if (instance == nullptr || !instance->barConfig.isAutoHideEnabled() || instance->pointerInside) {
+      if (instance == nullptr || instance->superHeld || instance->superDismissed || !instance->barConfig.isAutoHideEnabled()
+          || instance->pointerInside) {
         continue;
       }
       if (instance->barConfig.smartAutoHide && instance->smartAutoHidePinnedVisible) {
@@ -1887,6 +1917,7 @@ void Bar::reevaluateAutoHide() {
   for (const auto& instance : m_instances) {
     if (instance == nullptr
         || !barPointerHideAllowed(*instance)
+        || instance->superHeld
         || instance->pointerInside
         || instance->attachedPopupCount > 0) {
       continue;
@@ -1995,7 +2026,8 @@ void Bar::setInstanceIpcVisible(BarInstance& instance, bool visible) {
   const float current = instance.hideOpacity;
   const float target = visible ? 1.0F : 0.0F;
   instance.animations.animate(
-      current, target, Style::animNormal, visible ? Easing::EaseOutCubic : Easing::EaseInQuad,
+      current, target, static_cast<float>(instance.barConfig.animationDurationMs),
+      visible ? Easing::EaseOutCubic : Easing::EaseInQuad,
       [inst = &instance, this](float v) {
         inst->hideOpacity = v;
         syncBarSlideLayerTransform(*inst);
@@ -2353,7 +2385,10 @@ void Bar::endAttachedPopup(wl_surface* surface) {
 void Bar::show() {
   for (const auto& instance : m_instances) {
     if (instance != nullptr) {
+      instance->superPending = false;
+      instance->superRevealTimer.stop();
       instance->ipcLayoutReleased = false;
+      instance->superDismissed = false;
     }
   }
   applyIpcVisibility(true);
@@ -2361,9 +2396,14 @@ void Bar::show() {
 
 void Bar::hide() {
   for (const auto& instance : m_instances) {
-    if (instance != nullptr && !barSupportsSlideBehavior(instance->barConfig)) {
-      // bar-hide IPC always frees layout on non-autohide bars (v4 isVisible=false), regardless of reserve_space.
-      instance->ipcLayoutReleased = true;
+    if (instance != nullptr) {
+      instance->superHeld = false;
+      instance->superPending = false;
+      instance->superRevealTimer.stop();
+      if (!barSupportsSlideBehavior(instance->barConfig)) {
+        // bar-hide IPC always frees layout on non-autohide bars (v4 isVisible=false), regardless of reserve_space.
+        instance->ipcLayoutReleased = true;
+      }
     }
   }
   applyIpcVisibility(false);
@@ -2395,8 +2435,13 @@ void Bar::toggle() {
 
   if (anyEffectivelyVisible) {
     for (const auto& instance : m_instances) {
-      if (instance != nullptr && !barSupportsSlideBehavior(instance->barConfig)) {
-        instance->ipcLayoutReleased = true;
+      if (instance != nullptr) {
+        instance->superHeld = false;
+        instance->superPending = false;
+        instance->superRevealTimer.stop();
+        if (!barSupportsSlideBehavior(instance->barConfig)) {
+          instance->ipcLayoutReleased = true;
+        }
       }
     }
     applyIpcVisibility(false);
@@ -3387,7 +3432,7 @@ void Bar::revealAutoHideBar(BarInstance& instance) {
   }
 
   instance.animations.animate(
-      current, 1.0F, Style::animNormal, Easing::EaseOutCubic,
+      current, 1.0F, static_cast<float>(instance.barConfig.animationDurationMs), Easing::EaseOutCubic,
       [inst = &instance, this](float v) {
         inst->hideOpacity = v;
         syncBarSlideLayerTransform(*inst);
@@ -3453,7 +3498,7 @@ void Bar::applyBarCompositorBlur(BarInstance& instance) const {
 }
 
 void Bar::startHideFadeOut(BarInstance& instance, bool immediate) {
-  if (instance.autoHideDisablePending || instance.smartAutoHidePinnedVisible) {
+  if (instance.superHeld || instance.autoHideDisablePending || instance.smartAutoHidePinnedVisible) {
     return;
   }
   if (!immediate
@@ -3481,7 +3526,7 @@ void Bar::startHideFadeOut(BarInstance& instance, bool immediate) {
   instance.animations.cancelForOwner(instance.slideRoot);
   const float current = instance.hideOpacity;
   instance.animations.animate(
-      current, 0.0F, Style::animNormal, Easing::EaseInQuad,
+      current, 0.0F, static_cast<float>(instance.barConfig.animationDurationMs), Easing::EaseInQuad,
       [this, inst = &instance](float v) {
         inst->hideOpacity = v;
         syncBarSlideLayerTransform(*inst);
@@ -3623,8 +3668,9 @@ void Bar::buildScene(BarInstance& instance, std::uint32_t width, std::uint32_t h
     });
 
     if (instance.barConfig.smartAutoHide && m_platform != nullptr) {
-      instance.smartAutoHidePinnedVisible =
-          shell::smart_auto_hide::smartWantsPinnedVisible(*m_platform, instance.output);
+      instance.smartAutoHidePinnedVisible = shell::smart_auto_hide::smartWantsPinnedVisible(
+          *m_platform, instance.output, instance.barConfig.smartAutoHideWorkspaces
+      );
     }
     if (barConfigUsesSlideSurface(instance.barConfig)) {
       instance.slideRoot->setOpacity(1.0F);
@@ -3892,6 +3938,7 @@ bool Bar::onPointerEvent(const PointerEvent& event) {
       break;
     }
     if (barSupportsSlideBehavior(m_hoveredInstance->barConfig) && m_hoveredInstance->sceneRoot != nullptr) {
+      m_hoveredInstance->superDismissed = false;
       revealAutoHideBar(*m_hoveredInstance);
     }
     break;
@@ -4153,6 +4200,9 @@ std::string Bar::showBarIpc(std::string_view args) {
   }
 
   for (BarInstance* instance : targets) {
+    instance->superDismissed = false;
+    instance->superPending = false;
+    instance->superRevealTimer.stop();
     instance->ipcLayoutReleased = false;
     setInstanceIpcVisible(*instance, true);
     syncBarSurfaceChrome(*instance);
@@ -4173,6 +4223,9 @@ std::string Bar::hideBarIpc(std::string_view args) {
   }
 
   for (BarInstance* instance : targets) {
+    instance->superHeld = false;
+    instance->superPending = false;
+    instance->superRevealTimer.stop();
     if (!barSupportsSlideBehavior(instance->barConfig)) {
       instance->ipcLayoutReleased = true;
     }
@@ -4180,6 +4233,137 @@ std::string Bar::hideBarIpc(std::string_view args) {
     syncBarSurfaceChrome(*instance);
   }
   return "ok\n";
+}
+
+std::string Bar::setBarSuperHoldIpc(std::string_view args) {
+  const auto parts = noctalia::ipc::splitWords(args);
+  if (parts.size() != 1 || (parts[0] != "on" && parts[0] != "off")) {
+    return "error: usage: bar-super-hold on|off\n";
+  }
+
+  setSuperHold(parts[0] == "on");
+  return "ok\n";
+}
+
+void Bar::setSuperHold(bool held) {
+  wl_output* focused = (m_platform != nullptr) ? m_platform->preferredInteractiveOutput() : nullptr;
+
+  for (const auto& instanceUp : m_instances) {
+    BarInstance* instance = instanceUp.get();
+    if (instance == nullptr || !instance->barConfig.enabled || instance->surface == nullptr) {
+      continue;
+    }
+    // Super reveal is an auto-hide feature. A bar that is meant to stay
+    // visible must never be hidden by the Super watcher.
+    if (!instance->barConfig.isAutoHideEnabled()) {
+      instance->superHeld = false;
+      instance->superPending = false;
+      instance->superRevealTimer.stop();
+      continue;
+    }
+
+    if (held) {
+      bool applies = false;
+      switch (instance->barConfig.revealOnSuper) {
+        case BarSuperReveal::Off:
+          break;
+        case BarSuperReveal::Focused:
+          applies = focused != nullptr && instance->output == focused;
+          break;
+        case BarSuperReveal::All:
+          applies = true;
+          break;
+      }
+      if (!applies) {
+        continue;
+      }
+      if (instance->superHeld || instance->superPending) {
+        continue;
+      }
+
+      instance->superDismissed = false;
+      const std::int32_t delayMs = std::max<std::int32_t>(0, instance->barConfig.revealOnSuperDelayMs);
+      if (delayMs > 0) {
+        instance->superPending = true;
+        instance->superRevealTimer.stop();
+        instance->superRevealTimer.start(std::chrono::milliseconds(delayMs), [this, instance] {
+          if (!instance->superPending) {
+            return;
+          }
+          instance->superPending = false;
+          if (instance->barConfig.revealOnSuper == BarSuperReveal::Off || instance->surface == nullptr
+              || !instance->barConfig.isAutoHideEnabled()) {
+            return;
+          }
+          instance->superHeld = true;
+          instance->superDismissed = false;
+          instance->ipcLayoutReleased = false;
+          instance->autoHideDelayTimer.stop();
+          m_pendingWorkspaceRevealOutputs.erase(instance->outputName);
+          setInstanceIpcVisible(*instance, true);
+          syncBarAutoHideInputRegion(*instance);
+          syncBarSurfaceChrome(*instance);
+          instance->surface->requestRedraw();
+        });
+        continue;
+      }
+
+      instance->superHeld = true;
+      instance->ipcLayoutReleased = false;
+      instance->autoHideDelayTimer.stop();
+      m_pendingWorkspaceRevealOutputs.erase(instance->outputName);
+      setInstanceIpcVisible(*instance, true);
+    } else {
+      if (instance->superPending) {
+        instance->superPending = false;
+        instance->superRevealTimer.stop();
+        continue;
+      }
+      if (!instance->superHeld) {
+        continue;
+      }
+      instance->superHeld = false;
+      const bool wantsPinned = instance->barConfig.smartAutoHide && m_platform != nullptr
+          && shell::smart_auto_hide::smartWantsPinnedVisible(
+              *m_platform, instance->output, instance->barConfig.smartAutoHideWorkspaces
+          );
+      instance->smartAutoHidePinnedVisible = wantsPinned;
+      instance->superDismissed = !wantsPinned;
+      instance->superDismissedAt = std::chrono::steady_clock::now();
+      instance->ipcLayoutReleased = false;
+      instance->autoHideDelayTimer.stop();
+      m_pendingWorkspaceRevealOutputs.erase(instance->outputName);
+      if (wantsPinned) {
+        setInstanceIpcVisible(*instance, true);
+      } else if (barSupportsSlideBehavior(instance->barConfig)) {
+        startHideFadeOut(*instance, true);
+      } else {
+        instance->ipcLayoutReleased = true;
+        setInstanceIpcVisible(*instance, false);
+      }
+    }
+
+    syncBarAutoHideInputRegion(*instance);
+    syncBarSurfaceChrome(*instance);
+    if (instance->surface != nullptr) {
+      instance->surface->requestRedraw();
+    }
+  }
+}
+
+bool Bar::anySuperRevealEnabled() const {
+  if (std::ranges::any_of(m_instances, [](const auto& inst) {
+        return inst != nullptr && inst->barConfig.enabled && inst->barConfig.isAutoHideEnabled()
+            && inst->barConfig.revealOnSuper != BarSuperReveal::Off;
+      })) {
+    return true;
+  }
+  if (m_config != nullptr) {
+    return std::ranges::any_of(m_config->config().bars, [](const BarConfig& bar) {
+      return bar.enabled && bar.isAutoHideEnabled() && bar.revealOnSuper != BarSuperReveal::Off;
+    });
+  }
+  return false;
 }
 
 std::string Bar::toggleBarIpc(std::string_view args) {
@@ -4210,6 +4394,9 @@ std::string Bar::toggleBarIpc(std::string_view args) {
   }
 
   for (BarInstance* instance : targets) {
+    instance->superDismissed = false;
+    instance->superPending = false;
+    instance->superRevealTimer.stop();
     instance->ipcLayoutReleased = false;
     setInstanceIpcVisible(*instance, true);
     syncBarSurfaceChrome(*instance);
@@ -4313,7 +4500,7 @@ std::string Bar::setBarAutoHideIpc(std::string_view args) {
       const float current = instance.hideOpacity;
       instance.autoHideDisablePending = true;
       instance.animations.animate(
-          current, 1.0F, Style::animNormal, Easing::EaseOutCubic,
+          current, 1.0F, static_cast<float>(instance.barConfig.animationDurationMs), Easing::EaseOutCubic,
           [this, inst = &instance](float v) {
             inst->hideOpacity = v;
             syncBarSlideLayerTransform(*inst);
@@ -4454,6 +4641,10 @@ void Bar::registerIpc(IpcService& ipc) {
   ipc.bind(noctalia::cli::msg::barShow, [this](const std::string& args) -> std::string { return showBarIpc(args); });
 
   ipc.bind(noctalia::cli::msg::barHide, [this](const std::string& args) -> std::string { return hideBarIpc(args); });
+
+  ipc.bind(noctalia::cli::msg::barSuperHold, [this](const std::string& args) -> std::string {
+    return setBarSuperHoldIpc(args);
+  });
 
   ipc.bind(noctalia::cli::msg::barToggle, [this](const std::string& args) -> std::string {
     return toggleBarIpc(args);

@@ -81,6 +81,12 @@ public:
   void setAutoHideSuppressionCallback(std::function<bool(const BarInstance&)> callback);
   // Re-run auto-hide after a panel closes so unrelated bars are not left visible.
   void reevaluateAutoHide();
+  // Press/release Super from the in-process key watcher or the manual
+  // `bar-super-hold` IPC. Drives the reveal/dismiss state machine in one place.
+  void setSuperHold(bool held);
+  // True when any enabled bar instance reveals on Super, so the input watcher
+  // only opens /dev/input when the feature is actually used.
+  [[nodiscard]] bool anySuperRevealEnabled() const;
   // A panel closed without the pointer moving (key press, etc.). Hover state is
   // unchanged, so no hover event will re-arm the tooltip for the widget the pointer
   // is still sitting on — do it here. No-op when the pointer is not on a bar.
@@ -169,6 +175,7 @@ private:
   std::string showBarIpc(std::string_view args);
   std::string hideBarIpc(std::string_view args);
   std::string toggleBarIpc(std::string_view args);
+  std::string setBarSuperHoldIpc(std::string_view args);
   std::string toggleBarReserveSpaceIpc(std::string_view args);
   std::string setBarAutoHideIpc(std::string_view args);
   std::string setBarLayerIpc(std::string_view args);

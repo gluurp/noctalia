@@ -236,6 +236,10 @@ private:
     std::uint32_t outputName = 0;
     std::vector<Workspace> workspaces;
     std::vector<WorkspaceWindowAssignment> assignments;
+    // Hyprland keeps the regular workspace active while a special covers it, so
+    // opening/closing the scratchpad changes no workspace or assignment. Track
+    // the open overlay keys so the change filter does not drop that event.
+    std::vector<std::string> openOverlayWorkspaceKeys;
   };
 
   void bindExtWorkspace(ext_workspace_manager_v1* manager);

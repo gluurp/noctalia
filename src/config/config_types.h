@@ -97,6 +97,13 @@ std::optional<LengthSpec> parsePercentLength(std::string_view text);
 // Pixels as the bare number ("100"), percentages with a trailing '%' ("10%").
 std::string formatLength(const LengthSpec& length);
 
+// When a bar is revealed by holding Super.
+enum class BarSuperReveal : std::uint8_t {
+  Off = 0,
+  Focused = 1, // only the keyboard-focused output
+  All = 2,     // every enabled output
+};
+
 struct BarDeadZoneOverride {
   std::optional<std::unordered_map<std::string, std::string>> actions;
   std::optional<bool> clickThrough;
@@ -110,9 +117,14 @@ struct BarMonitorOverride {
   std::optional<bool> enabled;
   std::optional<bool> autoHide;
   std::optional<std::int32_t> autoHideDelayMs;
+  std::optional<std::int32_t> animationDurationMs;
   std::optional<bool> smartAutoHide;
+  std::optional<std::vector<std::string>> smartAutoHideWorkspaces;
   std::optional<bool> autoHideReserveSpace;
   std::optional<bool> showOnWorkspaceSwitch;
+  std::optional<BarSuperReveal> revealOnSuper;
+  std::optional<std::int32_t> revealOnSuperDelayMs;
+  std::optional<bool> edgeReveal;
   std::optional<bool> reserveSpace;
   std::optional<std::string> layer; // top | overlay | auto
   std::optional<std::int32_t> thickness;
@@ -184,9 +196,15 @@ struct BarConfig {
   bool enabled = true;
   bool autoHide = false;             // slide out when the pointer leaves; reveal on edge approach
   std::int32_t autoHideDelayMs = 0;  // wait after pointer leaves before hiding; 0 hides immediately
+  std::int32_t animationDurationMs = 200; // hide/show animation length
   bool smartAutoHide = false;        // hide while the active workspace has windows; show when it is empty
+  // Extra overlay workspace keys treated as visible content (empty = every open special).
+  std::vector<std::string> smartAutoHideWorkspaces;
   bool autoHideReserveSpace = false; // with auto_hide/smart_auto_hide: reserve layout only while the bar is visible
   bool showOnWorkspaceSwitch = true; // with auto_hide: briefly reveal when the active workspace changes
+  BarSuperReveal revealOnSuper = BarSuperReveal::Off; // reveal while Super is held
+  std::int32_t revealOnSuperDelayMs = 0;              // hold Super this long before revealing
+  bool edgeReveal = true;                             // reveal a hidden bar from its screen edge
 
   constexpr bool isAutoHideEnabled() const noexcept { return autoHide || smartAutoHide; }
   bool reserveSpace = true;  // reserve compositor exclusive zone; applies with or without auto_hide
@@ -676,6 +694,12 @@ template <typename T, std::size_t N> constexpr std::string_view enumToKey(const 
 constexpr EnumOption<BarAccordionDirection> kBarAccordionDirections[] = {
     {BarAccordionDirection::End, "end", "settings.options.accordion-direction.end"},
     {BarAccordionDirection::Start, "start", "settings.options.accordion-direction.start"},
+};
+
+constexpr EnumOption<BarSuperReveal> kBarSuperReveals[] = {
+    {BarSuperReveal::Off, "off", "settings.schema.bar.reveal-on-super.option-off"},
+    {BarSuperReveal::Focused, "focused", "settings.schema.bar.reveal-on-super.option-focused"},
+    {BarSuperReveal::All, "all", "settings.schema.bar.reveal-on-super.option-all"},
 };
 
 enum class DockEdge : std::uint8_t {

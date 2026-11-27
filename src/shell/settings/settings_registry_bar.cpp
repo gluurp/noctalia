@@ -60,6 +60,25 @@ namespace settings::registry {
         };
         entries.push_back(std::move(e));
       }
+      {
+        auto e = makeEntry(
+            section, "general", tr("settings.schema.bar.animation-duration.label"),
+            tr("settings.schema.bar.animation-duration.description"), path("animation_duration_ms"),
+            StepperSetting{
+                .value = bar.animationDurationMs,
+                .minValue = static_cast<int>(noctalia::config::schema::kBarAnimationDurationMsRange.min.value()),
+                .maxValue = static_cast<int>(noctalia::config::schema::kBarAnimationDurationMsRange.max.value()),
+                .step = static_cast<int>(noctalia::config::schema::kBarAnimationDurationMsRange.step.value()),
+                .valueSuffix = "ms",
+            },
+            "autohide animation speed duration slide fade"
+        );
+        e.visibleWhen = [barName = bar.name](const Config& c) {
+          const BarConfig* b = findBar(c, barName);
+          return b != nullptr && b->isAutoHideEnabled();
+        };
+        entries.push_back(std::move(e));
+      }
       const SettingVisibility autoHideOn = [barName = bar.name](const Config& c) {
         const BarConfig* b = findBar(c, barName);
         return b != nullptr && b->isAutoHideEnabled();
@@ -71,6 +90,52 @@ namespace settings::registry {
             ToggleSetting{bar.showOnWorkspaceSwitch}, "workspace reveal peek autohide"
         );
         e.visibleWhen = autoHideOn;
+        entries.push_back(std::move(e));
+      }
+      {
+        auto e = makeEntry(
+            section, "general", tr("settings.schema.bar.reveal-on-super.label"),
+            tr("settings.schema.bar.reveal-on-super.description"), path("reveal_on_super"),
+            enumSelect(kBarSuperReveals, bar.revealOnSuper), "super key hold reveal"
+        );
+        e.visibleWhen = autoHideOn;
+        entries.push_back(std::move(e));
+      }
+      {
+        auto e = makeEntry(
+            section, "general", tr("settings.schema.bar.reveal-on-super-delay.label"),
+            tr("settings.schema.bar.reveal-on-super-delay.description"), path("reveal_on_super_delay_ms"),
+            StepperSetting{
+                .value = bar.revealOnSuperDelayMs,
+                .minValue = static_cast<int>(noctalia::config::schema::kBarRevealOnSuperDelayMsRange.min.value()),
+                .maxValue = static_cast<int>(noctalia::config::schema::kBarRevealOnSuperDelayMsRange.max.value()),
+                .step = static_cast<int>(noctalia::config::schema::kBarRevealOnSuperDelayMsRange.step.value()),
+                .valueSuffix = "ms",
+            },
+            "super hold delay"
+        );
+        e.visibleWhen = [barName = bar.name](const Config& c) {
+          const BarConfig* b = findBar(c, barName);
+          return b != nullptr && b->isAutoHideEnabled() && b->revealOnSuper != BarSuperReveal::Off;
+        };
+        entries.push_back(std::move(e));
+      }
+      entries.push_back(makeEntry(
+          section, "general", tr("settings.schema.bar.edge-reveal.label"),
+          tr("settings.schema.bar.edge-reveal.description"), path("edge_reveal"),
+          ToggleSetting{bar.edgeReveal}, "edge pointer reveal"
+      ));
+      {
+        auto e = makeEntry(
+            section, "general", tr("settings.schema.bar.smart-auto-hide-workspaces.label"),
+            tr("settings.schema.bar.smart-auto-hide-workspaces.description"),
+            path("smart_auto_hide_workspaces"), ListSetting{.items = bar.smartAutoHideWorkspaces},
+            "smart auto hide overlay special workspace"
+        );
+        e.visibleWhen = [barName = bar.name](const Config& c) {
+          const BarConfig* b = findBar(c, barName);
+          return b != nullptr && b->smartAutoHide;
+        };
         entries.push_back(std::move(e));
       }
       entries.push_back(makeEntry(

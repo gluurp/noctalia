@@ -1978,10 +1978,13 @@ std::vector<CompositorPlatform::WorkspaceModelSnapshot> CompositorPlatform::work
 
   auto makeSnapshot = [&](const WaylandOutput* output) {
     auto* wlOutput = output != nullptr ? output->output : nullptr;
+    auto overlayKeys = openOverlayWorkspaceKeys(wlOutput);
+    std::ranges::sort(overlayKeys);
     return WorkspaceModelSnapshot{
         .outputName = output != nullptr ? output->name : 0,
         .workspaces = workspaces(wlOutput),
         .assignments = sortedAssignments(workspaceWindowAssignments(wlOutput)),
+        .openOverlayWorkspaceKeys = std::move(overlayKeys),
     };
   };
 
@@ -2025,7 +2028,8 @@ bool CompositorPlatform::sameWorkspaceModelSnapshot(
   for (std::size_t i = 0; i < lhs.size(); ++i) {
     if (lhs[i].outputName != rhs[i].outputName
         || lhs[i].workspaces.size() != rhs[i].workspaces.size()
-        || lhs[i].assignments.size() != rhs[i].assignments.size()) {
+        || lhs[i].assignments.size() != rhs[i].assignments.size()
+        || lhs[i].openOverlayWorkspaceKeys != rhs[i].openOverlayWorkspaceKeys) {
       return false;
     }
     for (std::size_t w = 0; w < lhs[i].workspaces.size(); ++w) {

@@ -999,6 +999,9 @@ void Application::initBarDockAndLayout() {
   });
   m_configService.addReloadCallback([this] { m_screenCorners.onConfigReload(); });
   m_configService.addReloadCallback([this] { m_hotCorners.onConfigReload(); });
+  m_superKeyWatcher.setCallback([this](bool held) { m_bar.setSuperHold(held); });
+  m_configService.addReloadCallback([this] { m_superKeyWatcher.setEnabled(m_bar.anySuperRevealEnabled()); });
+  m_superKeyWatcher.setEnabled(m_bar.anySuperRevealEnabled());
 
   m_layerPopupHosts.registerHost(
       [this](wl_surface* surface) {

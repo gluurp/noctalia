@@ -74,14 +74,29 @@ namespace settings {
     if (key == "auto_hide_delay_ms") {
       return override->autoHideDelayMs.has_value();
     }
+    if (key == "animation_duration_ms") {
+      return override->animationDurationMs.has_value();
+    }
     if (key == "smart_auto_hide") {
       return override->smartAutoHide.has_value();
+    }
+    if (key == "smart_auto_hide_workspaces") {
+      return override->smartAutoHideWorkspaces.has_value();
     }
     if (key == "auto_hide_reserve_space") {
       return override->autoHideReserveSpace.has_value();
     }
     if (key == "show_on_workspace_switch") {
       return override->showOnWorkspaceSwitch.has_value();
+    }
+    if (key == "reveal_on_super") {
+      return override->revealOnSuper.has_value();
+    }
+    if (key == "reveal_on_super_delay_ms") {
+      return override->revealOnSuperDelayMs.has_value();
+    }
+    if (key == "edge_reveal") {
+      return override->edgeReveal.has_value();
     }
     if (key == "reserve_space") {
       return override->reserveSpace.has_value();

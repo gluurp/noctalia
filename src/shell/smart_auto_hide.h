@@ -19,6 +19,9 @@ namespace shell::smart_auto_hide {
   struct OutputContent {
     std::vector<Workspace> workspaces;
     std::vector<WorkspaceWindowAssignment> assignments;
+    // Workspace keys of overlays presented over the output, such as Hyprland special
+    // workspaces. Their windows are in `assignments` but not in the active workspace.
+    std::vector<std::string> openOverlayWorkspaceKeys;
     // The compositor presents an overlay holding at least one window on this output.
     bool overlayPresented = false;
   };
@@ -37,9 +40,15 @@ namespace shell::smart_auto_hide {
     if (content.overlayPresented) {
       return true;
     }
+    const auto isOpenOverlay = [&content](std::string_view key) {
+      return std::ranges::find(content.openOverlayWorkspaceKeys, key) != content.openOverlayWorkspaceKeys.end();
+    };
     for (const auto& assignment : content.assignments) {
       if (assignment.minimizeState.has_value() && assignment.minimizeState->minimized) {
         continue;
+      }
+      if (isOpenOverlay(assignment.workspaceKey)) {
+        return true;
       }
       if (switcher_membership::workspaceKeyMatchesAssignment(assignment.workspaceKey, *active)) {
         return true;
@@ -66,17 +75,30 @@ namespace shell::smart_auto_hide {
     return !outputHasContent(content, std::forward<AnyUnminimizedToplevel>(anyUnminimizedToplevel));
   }
 
-  [[nodiscard]] inline OutputContent outputContent(const CompositorPlatform& platform, wl_output* output) {
+  [[nodiscard]] inline OutputContent outputContent(
+      const CompositorPlatform& platform, wl_output* output,
+      const std::vector<std::string>& overlayWhitelist = std::vector<std::string>{}
+  ) {
+    auto overlays = platform.openOverlayWorkspaceKeys(output);
+    if (!overlayWhitelist.empty()) {
+      std::erase_if(overlays, [&overlayWhitelist](const std::string& key) {
+        return std::ranges::find(overlayWhitelist, key) == overlayWhitelist.end();
+      });
+    }
     return OutputContent{
         .workspaces = platform.workspaces(output),
         .assignments = platform.workspaceWindowAssignments(output),
+        .openOverlayWorkspaceKeys = std::move(overlays),
         .overlayPresented = platform.hasOnScreenOverlay(output),
     };
   }
 
-  [[nodiscard]] inline bool smartWantsPinnedVisible(const CompositorPlatform& platform, wl_output* output) {
+  [[nodiscard]] inline bool smartWantsPinnedVisible(
+      const CompositorPlatform& platform, wl_output* output,
+      const std::vector<std::string>& overlayWhitelist = std::vector<std::string>{}
+  ) {
     const bool overviewOpen = platform.hasOverviewState() && platform.isOverviewOpen();
-    return wantsPinnedVisible(outputContent(platform, output), overviewOpen, [&platform, output] {
+    return wantsPinnedVisible(outputContent(platform, output, overlayWhitelist), overviewOpen, [&platform, output] {
       return platform.hasUnminimizedToplevels(output);
     });
   }

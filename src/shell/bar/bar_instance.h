@@ -11,6 +11,7 @@
 #include "shell/wayland/layer_surface.h"
 #include "ui/signal.h"
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -80,6 +81,15 @@ struct BarInstance {
   Timer autoHideDelayTimer;
   // smart_auto_hide: active workspace empty (or overview open) — keep the bar visible.
   bool smartAutoHidePinnedVisible = false;
+  // reveal_on_super: bar is held visible until the Super release IPC arrives.
+  bool superHeld = false;
+  bool superPending = false;
+  Timer superRevealTimer;
+  // After a Super release the bar stays hidden until the next Super press, edge
+  // reveal, explicit show, or a later workspace change (not the one that
+  // happened during the hold).
+  bool superDismissed = false;
+  std::chrono::steady_clock::time_point superDismissedAt{};
   bool pointerInside = false;
   float lastPointerSx = 0.0F;
   float lastPointerSy = 0.0F;

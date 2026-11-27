@@ -172,14 +172,29 @@ namespace {
     if (ovr.autoHideDelayMs) {
       resolved.autoHideDelayMs = *ovr.autoHideDelayMs;
     }
+    if (ovr.animationDurationMs) {
+      resolved.animationDurationMs = *ovr.animationDurationMs;
+    }
     if (ovr.smartAutoHide) {
       resolved.smartAutoHide = *ovr.smartAutoHide;
+    }
+    if (ovr.smartAutoHideWorkspaces) {
+      resolved.smartAutoHideWorkspaces = *ovr.smartAutoHideWorkspaces;
     }
     if (ovr.autoHideReserveSpace) {
       resolved.autoHideReserveSpace = *ovr.autoHideReserveSpace;
     }
     if (ovr.showOnWorkspaceSwitch) {
       resolved.showOnWorkspaceSwitch = *ovr.showOnWorkspaceSwitch;
+    }
+    if (ovr.revealOnSuper) {
+      resolved.revealOnSuper = *ovr.revealOnSuper;
+    }
+    if (ovr.revealOnSuperDelayMs) {
+      resolved.revealOnSuperDelayMs = *ovr.revealOnSuperDelayMs;
+    }
+    if (ovr.edgeReveal) {
+      resolved.edgeReveal = *ovr.edgeReveal;
     }
     if (ovr.reserveSpace) {
       resolved.reserveSpace = *ovr.reserveSpace;
