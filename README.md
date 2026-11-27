@@ -19,6 +19,24 @@ licensed. The `local` branch is based on v5.6.0 and adds four changes:
 Machine config and detailed notes live in
 [gluurp/software/noctalia](https://github.com/gluurp/software/tree/main/noctalia).
 
+## Build and install
+
+Requires `meson`, `ninja`, `pkg-config`, and Noctalia's build dependencies; see
+upstream `BUILDING.md`. The script builds the branch in `build/` and installs to
+`/usr/local` (so it shadows a packaged `noctalia` in `PATH`).
+
+```sh
+./install.sh              # build and install, using sudo for the install step
+./install.sh --build-only # compile without installing
+./install.sh --prefix /usr
+```
+
+Then restart the shell:
+
+```sh
+systemctl --user restart noctalia-shell.service
+```
+
 ## Update
 
 ```sh
